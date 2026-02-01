@@ -13,23 +13,23 @@ function App() {
   const [selectedStaff, setSelectedStaff] = useState({});
 
   const fetchStaff = async (movieId) => {
-  if (selectedStaff[movieId]) return;
+    if (selectedStaff[movieId]) return;
 
-  try {
-    const res = await axios.get(`${API_URL}/movie/${movieId}/staff`);
-    
-    // Группируем данные
-    const staff = {
-      actors: res.data.filter(s => s.professionKey === 'ACTOR'),
-      directors: res.data.filter(s => s.professionKey === 'DIRECTOR'),
-      writers: res.data.filter(s => s.professionKey === 'WRITER')
-    };
+    try {
+      const res = await axios.get(`${API_URL}/movie/${movieId}/staff`);
+      
+      // Группируем данные
+      const staff = {
+        actors: res.data.filter(s => s.professionKey === 'ACTOR'),
+        directors: res.data.filter(s => s.professionKey === 'DIRECTOR'),
+        writers: res.data.filter(s => s.professionKey === 'WRITER')
+      };
 
-    setSelectedStaff(prev => ({ ...prev, [movieId]: staff }));
-  } catch (err) {
-    console.error("Ошибка загрузки состава", err);
-  }
-};
+      setSelectedStaff(prev => ({ ...prev, [movieId]: staff }));
+    } catch (err) {
+      console.error("Ошибка загрузки состава", err);
+    }
+  };
 
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('user')));
   const [authData, setAuthData] = useState({username: '', password: ''});
@@ -91,6 +91,27 @@ function App() {
     }
   };
 
+  // 1. Новые состояния в начале компонента
+  const [constructorMovies, setConstructorMovies] = useState([]); // "Корзина" фильмов
+  const [weights, setWeights] = useState({ genres: 5, staff: 3, description: 1 });
+  const [keywords, setKeywords] = useState("");
+
+  // 2. Функция отправки запроса
+  const fetchCustomRecs = async () => {
+    const response = await fetch('http://localhost:8000/recommendations/custom', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: user.id,
+        base_movie_ids: constructorMovies.map(m => m.id),
+        weights: weights,
+        manual_keywords: keywords
+      })
+    });
+    const data = await response.json();
+    setRecommendations(data); // Обновляем ленту рекомендаций
+  };
+
   // Загружаем рекомендации при старте
   useEffect(() => {
     if (user) fetchRecs();
@@ -136,6 +157,8 @@ function App() {
     );
   }
 
+  
+
   return (
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', backgroundColor: '#f4f4f9', minHeight: '100vh' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
@@ -148,6 +171,44 @@ function App() {
           <button onClick={handleLogout}>Выйти</button>
         </div>
       </header>
+
+      <div className="constructor-panel" style={{ padding: '20px', background: '#f3f4f6', borderRadius: '12px' }}>
+        <h3>🏗️ Конструктор рекомендаций</h3>
+        
+        <div style={{ display: 'flex', gap: '20px', marginBottom: '15px' }}>
+          <div>
+            <label>Приоритет Жанров: {weights.genres}</label>
+            <input type="range" min="1" max="10" value={weights.genres} 
+                  onChange={(e) => setWeights({...weights, genres: parseInt(e.target.value)})} />
+          </div>
+          <div>
+            <label>Актеры/Режиссеры: {weights.staff}</label>
+            <input type="range" min="1" max="10" value={weights.staff} 
+                  onChange={(e) => setWeights({...weights, staff: parseInt(e.target.value)})} />
+          </div>
+        </div>
+
+        <input 
+          type="text" 
+          placeholder="Ключевые слова (напр. космос, ограбление...)" 
+          value={keywords}
+          onChange={(e) => setKeywords(e.target.value)}
+          style={{ width: '100%', padding: '10px', marginBottom: '10px' }}
+        />
+
+        <div className="basket">
+          {constructorMovies.map(m => (
+            <span key={m.id} style={{ marginRight: '10px', background: '#fff', padding: '5px' }}>
+              {m.title} <button onClick={() => setConstructorMovies(constructorMovies.filter(x => x.id !== m.id))}>x</button>
+            </span>
+          ))}
+        </div>
+
+        <button onClick={fetchCustomRecs} style={{ marginTop: '10px', padding: '10px 20px', background: '#2563eb', color: '#fff' }}>
+          Сгенерировать микс
+        </button>
+      </div>
+
 
       {/* Блок рекомендаций */}
       <section style={{ marginBottom: '40px' }}>

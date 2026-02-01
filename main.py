@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
+from typing import List, Dict, Optional
 import pandas as pd
 import numpy as np
 from surprise import SVD, Dataset, Reader
@@ -214,7 +214,12 @@ if not movies_df.empty:
     indices = pd.Series(movies_df.index, index=movies_df['id']).drop_duplicates()
     print("Улучшенная модель рекомендаций готова!")
 
-
+# Модель для запроса из "Конструктора"
+class CustomRecRequest(BaseModel):
+    user_id: int
+    base_movie_ids: List[int]  # Выбранные фильмы для примера
+    weights: Dict[str, float]  # Веса: {"genres": 5, "staff": 3, "description": 1}
+    manual_keywords: Optional[str] = "" # Ручные ключевые слова
 
 # --- 4. ЭНДПОИНТЫ ---
 
@@ -530,6 +535,83 @@ async def get_movie_staff(movie_id: int):
             print(f"ERROR: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/recommendations/custom")
+async def get_custom_recommendations(req: CustomRecRequest):
+    db = SessionLocal()
+    REC_COUNT = 10
+    
+    # 1. Формируем "Супер-Суп" на основе выбранных фильмов и весов
+    # Мы буквально умножаем текст: если вес жанра 5, мы вставляем строку жанров 5 раз
+    dynamic_soup = ""
+    
+    # Добавляем ключевые слова от пользователя (с высоким приоритетом)
+    if req.manual_keywords:
+        dynamic_soup += (req.manual_keywords + " ") * 10 
+
+    for m_id in req.base_movie_ids:
+        if m_id in indices:
+            movie_row = movies_df.iloc[indices[m_id]]
+            
+            # Взвешиваем каждую часть контента
+            genres_part = (str(movie_row['genres']) + " ") * int(req.weights.get('genres', 1))
+            staff_part = (str(movie_row['staff']) + " ") * int(req.weights.get('staff', 1))
+            desc_part = (str(movie_row['description']) + " ") * int(req.weights.get('description', 1))
+            
+            dynamic_soup += f"{genres_part} {staff_part} {desc_part} "
+
+    if not dynamic_soup:
+        return []
+
+    # 2. TF-IDF поиск по динамическому супу
+    query_vec = tfidf.transform([dynamic_soup])
+    sim_scores = linear_kernel(query_vec, tfidf_matrix).flatten()
+
+    # 3. Учет "Анти-интересов" (дизлайков пользователя)
+    bad_ratings = db.query(RatingDB).filter(RatingDB.user_id == req.user_id, RatingDB.rating <= 3).all()
+    if bad_ratings:
+        anti_soup = ""
+        for r in bad_ratings:
+            if r.movie_id in indices:
+                anti_soup += movies_df.iloc[indices[r.movie_id]]['content_soup'] + " "
+        if anti_soup:
+            anti_vec = tfidf.transform([anti_soup])
+            neg_scores = linear_kernel(anti_vec, tfidf_matrix).flatten()
+            # Вычитаем негатив из позитива
+            sim_scores = sim_scores - (neg_scores * 0.7)
+
+    # 4. Получаем финальные ID
+    ordered_indices = np.argsort(sim_scores)[::-1]
+    watched_ids = {r.movie_id for r in db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()}
+    
+    rec_movie_ids = []
+    for idx in ordered_indices:
+        m_id = int(movies_df.iloc[idx]['id'])
+        if m_id not in watched_ids and m_id not in req.base_movie_ids:
+            rec_movie_ids.append(m_id)
+        if len(rec_movie_ids) >= REC_COUNT:
+            break
+
+    # 5. Сбор данных с рейтингами IMDb и ботов
+    results = db.query(
+        MovieDB, 
+        func.avg(RatingDB.rating).label("avg_rating"),
+        func.count(RatingDB.id).label("votes_count")
+    ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+     .filter(MovieDB.id.in_(rec_movie_ids))\
+     .group_by(MovieDB.id).all()
+
+    final_recs = []
+    for movie, avg_rating, votes_count in results:
+        final_recs.append({
+            "id": movie.id, "title": movie.title, "genres": movie.genres,
+            "poster_url": movie.poster_url, "imdb_rating": movie.imdb_rating,
+            "average_rating": round(avg_rating, 1) if avg_rating else 0,
+            "votes": votes_count
+        })
+
+    final_recs.sort(key=lambda x: rec_movie_ids.index(x["id"]))
+    db.close()
+    return final_recs
 
 if __name__ == "__main__":
     import uvicorn
