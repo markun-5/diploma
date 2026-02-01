@@ -93,7 +93,7 @@ function App() {
 
   // 1. Новые состояния в начале компонента
   const [constructorMovies, setConstructorMovies] = useState([]); // "Корзина" фильмов
-  const [weights, setWeights] = useState({ genres: 5, staff: 3, description: 1 });
+  const [weights, setWeights] = useState({ genres: 1, staff: 1, description: 1 });
   const [keywords, setKeywords] = useState("");
 
   // 2. Функция отправки запроса
@@ -172,46 +172,72 @@ function App() {
         </div>
       </header>
 
-      <div className="constructor-panel" style={{ padding: '20px', background: '#f3f4f6', borderRadius: '12px' }}>
-        <h3>🏗️ Конструктор рекомендаций</h3>
-        
-        <div style={{ display: 'flex', gap: '20px', marginBottom: '15px' }}>
-          <div>
-            <label>Приоритет Жанров: {weights.genres}</label>
-            <input type="range" min="1" max="10" value={weights.genres} 
-                  onChange={(e) => setWeights({...weights, genres: parseInt(e.target.value)})} />
-          </div>
-          <div>
-            <label>Актеры/Режиссеры: {weights.staff}</label>
-            <input type="range" min="1" max="10" value={weights.staff} 
-                  onChange={(e) => setWeights({...weights, staff: parseInt(e.target.value)})} />
-          </div>
-        </div>
-
-        <input 
-          type="text" 
-          placeholder="Ключевые слова (напр. космос, ограбление...)" 
-          value={keywords}
-          onChange={(e) => setKeywords(e.target.value)}
-          style={{ width: '100%', padding: '10px', marginBottom: '10px' }}
-        />
-
-        <div className="basket">
-          {constructorMovies.map(m => (
-            <span key={m.id} style={{ marginRight: '10px', background: '#fff', padding: '5px' }}>
-              {m.title} <button onClick={() => setConstructorMovies(constructorMovies.filter(x => x.id !== m.id))}>x</button>
-            </span>
-          ))}
-        </div>
-
-        <button onClick={fetchCustomRecs} style={{ marginTop: '10px', padding: '10px 20px', background: '#2563eb', color: '#fff' }}>
-          Сгенерировать микс
-        </button>
-      </div>
-
 
       {/* Блок рекомендаций */}
       <section style={{ marginBottom: '40px' }}>
+
+      {/* новое */}
+      {/* БЛОК КОНСТРУКТОРА */}
+        <div style={{ 
+          padding: '20px', 
+          background: '#f8fafc', 
+          borderRadius: '12px', 
+          border: '1px solid #e2e8f0',
+          marginBottom: '30px',
+          boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'
+        }}>
+          <h3 style={{ marginTop: 0, color: '#1e293b' }}>🏗️ Конструктор рекомендаций</h3>
+          <p style={{ fontSize: '14px', color: '#64748b' }}>Настройте веса и выберите фильмы-ориентиры</p>
+          
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '20px' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Жанры: {weights.genres}</label>
+              <input type="range" min="1" max="10" value={weights.genres} 
+                    onChange={(e) => setWeights({...weights, genres: parseInt(e.target.value)})} 
+                    style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Актеры/Режиссеры: {weights.staff}</label>
+              <input type="range" min="1" max="10" value={weights.staff} 
+                    onChange={(e) => setWeights({...weights, staff: parseInt(e.target.value)})} 
+                    style={{ width: '100%' }} />
+            </div>
+            <div>
+              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Описание: {weights.description}</label>
+              <input type="range" min="1" max="10" value={weights.description} 
+                    onChange={(e) => setWeights({...weights, description: parseInt(e.target.value)})} 
+                    style={{ width: '100%' }} />
+            </div>
+          </div>
+
+          <input 
+            type="text" 
+            placeholder="Добавьте ключевые слова (например: киберпанк, космос...)" 
+            value={keywords}
+            onChange={(e) => setKeywords(e.target.value)}
+            style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', marginBottom: '15px', boxSizing: 'border-box' }}
+          />
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '15px' }}>
+            {constructorMovies.map(movie => (
+              <span key={movie.id} style={{ background: '#3b82f6', color: 'white', padding: '5px 12px', borderRadius: '20px', fontSize: '14px', display: 'flex', alignItems: 'center' }}>
+                {movie.title}
+                <button onClick={() => setConstructorMovies(constructorMovies.filter(m => m.id !== movie.id))} 
+                        style={{ background: 'none', border: 'none', color: 'white', marginLeft: '8px', cursor: 'pointer', fontWeight: 'bold' }}>×</button>
+              </span>
+            ))}
+            {constructorMovies.length === 0 && <span style={{ color: '#94a3b8', fontSize: '14px' }}>Фильмы не выбраны. Добавьте их кнопкой "В конструктор" на карточках ниже.</span>}
+          </div>
+
+          <button onClick={fetchCustomRecs} 
+                  disabled={constructorMovies.length === 0 && !keywords}
+                  style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', fontWeight: '600', cursor: 'pointer', width: '100%' }}>
+            Сгенерировать микс на основе выбранного
+          </button>
+        </div>
+        {/* новое */}
+
+
         <h2>Персональные рекомендации</h2>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '20px' }}>
           {recommendations.length > 0 ? recommendations.map(movie => (
@@ -283,6 +309,26 @@ function App() {
                   <option key={i+1} value={i+1}>{i + 1}</option>
                 ))}
               </select>
+
+              <button 
+                onClick={() => {
+                  // Проверка, чтобы не добавлять дубликаты
+                  if (!constructorMovies.find(m => m.id === movie.id)) {
+                    setConstructorMovies([...constructorMovies, movie]);
+                  }
+                }}
+                style={{ 
+                  marginTop: '10px', 
+                  width: '100%', 
+                  padding: '8px', 
+                  background: '#f1f5f9', 
+                  border: '1px solid #cbd5e1', 
+                  borderRadius: '6px', 
+                  cursor: 'pointer' 
+                }}
+              >
+                ✨ В конструктор
+              </button>
 
             </div>
           )) : <p>Оцените несколько фильмов, чтобы получить рекомендации!</p>}
@@ -375,6 +421,28 @@ function App() {
                 ))}
               </select>
               
+
+              <button 
+                onClick={() => {
+                  // Проверка, чтобы не добавлять дубликаты
+                  if (!constructorMovies.find(m => m.id === movie.id)) {
+                    setConstructorMovies([...constructorMovies, movie]);
+                  }
+                }}
+                style={{ 
+                  marginTop: '10px', 
+                  width: '100%', 
+                  padding: '8px', 
+                  background: '#f1f5f9', 
+                  border: '1px solid #cbd5e1', 
+                  borderRadius: '6px', 
+                  cursor: 'pointer' 
+                }}
+              >
+                ✨ В конструктор
+              </button>
+
+
             </div>
           ))}
         </div>
