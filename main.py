@@ -540,33 +540,39 @@ async def get_custom_recommendations(req: CustomRecRequest):
     db = SessionLocal()
     REC_COUNT = 10
     
-    # 1. Формируем "Супер-Суп" на основе выбранных фильмов и весов
-    # Мы буквально умножаем текст: если вес жанра 5, мы вставляем строку жанров 5 раз
-    dynamic_soup = ""
+    # Инициализируем массив нулей длиной в количество всех фильмов
+    # Сюда будем накапливать баллы похожести
+    total_sim_scores = np.zeros(tfidf_matrix.shape[0])
     
-    # Добавляем ключевые слова от пользователя (с высоким приоритетом)
-    if req.manual_keywords:
-        dynamic_soup += (req.manual_keywords + " ") * 10 
-
+    # 1. Проходим по КАЖДОМУ выбранному фильму отдельно
     for m_id in req.base_movie_ids:
         if m_id in indices:
             movie_row = movies_df.iloc[indices[m_id]]
             
-            # Взвешиваем каждую часть контента
+            # Формируем индивидуальный суп для этого фильма с учетом весов
+            # Используем умножение строки для имитации веса
             genres_part = (str(movie_row['genres']) + " ") * int(req.weights.get('genres', 1))
             staff_part = (str(movie_row['staff']) + " ") * int(req.weights.get('staff', 1))
             desc_part = (str(movie_row['description']) + " ") * int(req.weights.get('description', 1))
             
-            dynamic_soup += f"{genres_part} {staff_part} {desc_part} "
+            single_movie_soup = f"{genres_part} {staff_part} {desc_part}"
+            
+            # Считаем похожесть всей базы конкретно на ЭТОТ фильм
+            query_vec = tfidf.transform([single_movie_soup])
+            sim_scores = linear_kernel(query_vec, tfidf_matrix).flatten()
+            
+            # Добавляем результаты в общую копилку
+            total_sim_scores += sim_scores
 
-    if not dynamic_soup:
-        return []
+    # Если пользователь ввел ручные ключевые слова, добавляем их влияние отдельно
+    if req.manual_keywords:
+        kw_vec = tfidf.transform([req.manual_keywords])
+        kw_scores = linear_kernel(kw_vec, tfidf_matrix).flatten()
+        # Ключевые слова влияют на результат с весом 1.5 (можно менять)
+        total_sim_scores += (kw_scores * 1.5)
 
-    # 2. TF-IDF поиск по динамическому супу
-    query_vec = tfidf.transform([dynamic_soup])
-    sim_scores = linear_kernel(query_vec, tfidf_matrix).flatten()
-
-    # 3. Учет "Анти-интересов" (дизлайков пользователя)
+    # 2. Учет "Анти-интересов" (дизлайков)
+    # Здесь логика остается прежней: вычитаем то, что не нравится
     bad_ratings = db.query(RatingDB).filter(RatingDB.user_id == req.user_id, RatingDB.rating <= 3).all()
     if bad_ratings:
         anti_soup = ""
@@ -576,22 +582,28 @@ async def get_custom_recommendations(req: CustomRecRequest):
         if anti_soup:
             anti_vec = tfidf.transform([anti_soup])
             neg_scores = linear_kernel(anti_vec, tfidf_matrix).flatten()
-            # Вычитаем негатив из позитива
-            sim_scores = sim_scores - (neg_scores * 0.7)
+            total_sim_scores = total_sim_scores - (neg_scores * 0.7)
 
-    # 4. Получаем финальные ID
-    ordered_indices = np.argsort(sim_scores)[::-1]
+    # 3. Сортировка и фильтрация
+    # argsort возвращает индексы от меньшего к большему, поэтому берем [::-1]
+    ordered_indices = np.argsort(total_sim_scores)[::-1]
+    
     watched_ids = {r.movie_id for r in db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()}
     
     rec_movie_ids = []
+    # Начинаем не с 0, а с 1, так как на 0 месте часто оказывается сам фильм из запроса
+    # Но так как у нас сумма нескольких фильмов, просто фильтруем входные ID
     for idx in ordered_indices:
         m_id = int(movies_df.iloc[idx]['id'])
+        
+        # Исключаем уже просмотренные и те, что мы сами выбрали в конструктор
         if m_id not in watched_ids and m_id not in req.base_movie_ids:
             rec_movie_ids.append(m_id)
+            
         if len(rec_movie_ids) >= REC_COUNT:
             break
 
-    # 5. Сбор данных с рейтингами IMDb и ботов
+    # 4. Сбор финальных данных
     results = db.query(
         MovieDB, 
         func.avg(RatingDB.rating).label("avg_rating"),
@@ -600,18 +612,24 @@ async def get_custom_recommendations(req: CustomRecRequest):
      .filter(MovieDB.id.in_(rec_movie_ids))\
      .group_by(MovieDB.id).all()
 
-    final_recs = []
+    recommendations_list = []
     for movie, avg_rating, votes_count in results:
-        final_recs.append({
-            "id": movie.id, "title": movie.title, "genres": movie.genres,
-            "poster_url": movie.poster_url, "imdb_rating": movie.imdb_rating,
+        recommendations_list.append({
+            "id": movie.id,
+            "title": movie.title,
+            "genres": movie.genres,
+            "description": movie.description,
+            "poster_url": movie.poster_url,
+            "imdb_rating": movie.imdb_rating or 0,
             "average_rating": round(avg_rating, 1) if avg_rating else 0,
             "votes": votes_count
         })
 
-    final_recs.sort(key=lambda x: rec_movie_ids.index(x["id"]))
+    # Восстанавливаем порядок
+    recommendations_list.sort(key=lambda x: rec_movie_ids.index(x["id"]))
+    
     db.close()
-    return final_recs
+    return recommendations_list
 
 if __name__ == "__main__":
     import uvicorn
