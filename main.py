@@ -301,16 +301,41 @@ def read_root():
 
 @app.get("/recommendations/{user_id}")
 async def get_recommendations(user_id: int):
-    REC_COUNT = 10 
+    REC_COUNT = 20 
     db = SessionLocal()
     
     ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
     watched_ids = {r.movie_id for r in ratings}
 
+    user_ratings_map = {r.movie_id: r.rating for r in ratings}
+
     if not ratings:
-        random_movies = db.query(MovieDB).order_by(func.random()).limit(REC_COUNT).all()
+        # Запрос: Берем фильмы, считаем средний бал и кол-во голосов на нашем сайте,
+        # но сортируем в первую очередь по IMDb (так как там база оценок больше)
+        results = db.query(
+            MovieDB, 
+            func.avg(RatingDB.rating).label("avg"), 
+            func.count(RatingDB.id).label("cnt")
+        ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+         .group_by(MovieDB.id)\
+         .order_by(MovieDB.imdb_rating.desc(), func.count(RatingDB.id).desc())\
+         .limit(REC_COUNT).all()
+
+        final = []
+        for movie, avg, cnt in results:
+            final.append({
+                "id": movie.id, 
+                "title": movie.title, 
+                "genres": movie.genres,
+                "description": movie.description, 
+                "poster_url": movie.poster_url,
+                "average_rating": round(avg, 1) if avg else 0, 
+                "votes": cnt, 
+                "imdb_rating": movie.imdb_rating,
+                "user_rating": user_ratings_map.get(movie.id, 0)
+            })
         db.close()
-        return random_movies
+        return final
 
     top_movies = [r.movie_id for r in ratings if r.rating >= 7][:5]
     bad_movies = [r.movie_id for r in ratings if r.rating <= 4][:5]
@@ -375,7 +400,7 @@ async def get_recommendations(user_id: int):
         final.append({
             "id": movie.id, "title": movie.title, "genres": movie.genres,
             "description": movie.description, "poster_url": movie.poster_url,
-            "average_rating": round(avg, 1) if avg else 0, "votes": cnt, "imdb_rating": movie.imdb_rating
+            "average_rating": round(avg, 1) if avg else 0, "votes": cnt, "imdb_rating": movie.imdb_rating, "user_rating": user_ratings_map.get(movie.id, 0)
         })
     final.sort(key=lambda x: rec_movie_ids.index(x["id"]))
     db.close()
@@ -455,9 +480,10 @@ async def create_user(user_data: UserCreate):
     return new_user
 
 @app.get("/search")
-async def search_movies(title: str):
+async def search_movies(title: str, user_id: int = 0): # Добавили user_id
     db = SessionLocal()
-    # 1. Добавляем movie.imdb_rating в запрос
+    
+    # 1. Получаем общую информацию о фильмах
     results = db.query(
         MovieDB, 
         func.avg(RatingDB.rating).label("avg_rating"),
@@ -466,11 +492,17 @@ async def search_movies(title: str):
      .filter(MovieDB.title.ilike(f"%{title}%"))\
      .group_by(MovieDB.id).all()
     
+    # 2. Получаем оценки конкретно этого пользователя
+    user_ratings_map = {}
+    if user_id > 0:
+        u_ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
+        user_ratings_map = {r.movie_id: r.rating for r in u_ratings}
+    
     db.close()
     
     movies_with_ratings = []
     for movie, avg_rating, votes_count in results:
-        m_dict = {
+        movies_with_ratings.append({
             "id": movie.id,
             "title": movie.title,
             "genres": movie.genres,
@@ -478,10 +510,9 @@ async def search_movies(title: str):
             "poster_url": movie.poster_url,
             "average_rating": round(avg_rating, 1) if avg_rating else 0,
             "votes": votes_count,
-            # ВАЖНО: Добавь эту строку ниже!
-            "imdb_rating": movie.imdb_rating # Берем напрямую из объекта movie
-        }
-        movies_with_ratings.append(m_dict)
+            "imdb_rating": movie.imdb_rating,
+            "user_rating": user_ratings_map.get(movie.id, 0) # ПЕРЕДАЕМ ОЦЕНКУ
+        })
         
     return movies_with_ratings
 
@@ -680,7 +711,12 @@ async def get_custom_recommendations(req: CustomRecRequest):
         total_scores += (kw_sim * 2.0)
 
     # Фильтрация
-    watched_ids = {r.movie_id for r in db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()}
+    # watched_ids = {r.movie_id for r in db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()}
+    
+    # Сначала достаем все оценки пользователя для фильтрации и для отображения звезд
+    user_ratings = db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()
+    watched_ids = {r.movie_id for r in user_ratings}
+    user_ratings_map = {r.movie_id: r.rating for r in user_ratings} # Карта оценок
     ordered_indices = np.argsort(total_scores)[::-1]
     rec_ids = []
     
@@ -765,7 +801,8 @@ async def get_custom_recommendations(req: CustomRecRequest):
             "imdb_rating": row["imdb_rating"] or 0,
             "average_rating": round(row["avg"], 1) if row["avg"] else 0, # Тут было avg_rating
             "votes": int(row["cnt"]), # Тут было votes_count
-            "match_reason": reason_text
+            "match_reason": reason_text,
+            "user_rating": user_ratings_map.get(row["id"], 0)
         })
 
     final_recs.sort(key=lambda x: rec_ids.index(x["id"]))
