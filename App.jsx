@@ -1,506 +1,611 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Heart, Film, User } from 'lucide-react';
+import { Search, Heart, Film, User, Sliders, X, Menu, Settings } from 'lucide-react';
 
-// Настраиваем адрес нашего бэкенда
 const API_URL = "http://127.0.0.1:8000";
 
 function App() {
+  // --- STATE ---
   const [movies, setMovies] = useState([]);
-  const [search, setSearch] = useState("");
   const [recommendations, setRecommendations] = useState([]);
-
-  const [selectedStaff, setSelectedStaff] = useState({});
-
-  const fetchStaff = async (movieId) => {
-    if (selectedStaff[movieId]) return;
-
-    try {
-      const res = await axios.get(`${API_URL}/movie/${movieId}/staff`);
-      
-      // Группируем данные
-      const staff = {
-        actors: res.data.filter(s => s.professionKey === 'ACTOR'),
-        directors: res.data.filter(s => s.professionKey === 'DIRECTOR'),
-        writers: res.data.filter(s => s.professionKey === 'WRITER')
-      };
-
-      setSelectedStaff(prev => ({ ...prev, [movieId]: staff }));
-    } catch (err) {
-      console.error("Ошибка загрузки состава", err);
-    }
-  };
-
+  const [search, setSearch] = useState("");
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('user')));
-  const [authData, setAuthData] = useState({username: '', password: ''});
-  const [isRegistering, setIsRegistering] = useState(false);
   
-  const handleAuth = async (e) => {
-    if (e) e.preventDefault();
-    const endpoint = isRegistering ? '/register' : '/login';
-    try {
-      const res = await axios.post(`${API_URL}${endpoint}`, authData);
-      localStorage.setItem('user', JSON.stringify(res.data));
-      setUser(res.data);
-    } catch (err) {
-      alert(err.response?.data?.detail || "Ошибка доступа");
-    }
-  };
+  // Состояния для UI
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [authMode, setAuthMode] = useState('login'); // login | register
+  const [authData, setAuthData] = useState({ username: '', password: '' });
+  
+  // Состояния для ВЕСОВ (Параметры поиска)
+  const [weights, setWeights] = useState({
+    genres: 5,
+    staff: 2,
+    description: 8
+  });
 
-  const handleLogout = () => {
-    localStorage.removeItem('user');
-    setUser(null);
-    setSearch("");
-    setMovies([]);
-    setRecommendations([]);
-  }
+  // Вспомогательные состояния
+  const [selectedStaff, setSelectedStaff] = useState({});
+  const [showDescriptions, setShowDescriptions] = useState({});
 
-  // 1. Функция поиска фильмов
+  // --- API FUNCTIONS ---
+
   const handleSearch = async (e) => {
     e.preventDefault();
+    if (!search.trim()) return;
     try {
-      const res = await axios.get(`${API_URL}/search?title=${search}`);
+      const res = await axios.get(`${API_URL}/movies/search?query=${search}`);
       setMovies(res.data);
+      setRecommendations([]); // Очищаем рекомендации при новом поиске
     } catch (err) {
       console.error("Ошибка поиска", err);
     }
   };
 
-  // 2. Функция получения рекомендаций
-  const fetchRecs = async () => {
+  const fetchRecommendations = async (baseMovieId) => {
     try {
-      const res = await axios.get(`${API_URL}/recommendations/${user.id}`);
+      // Отправляем ID фильма и текущие настройки весов
+      const res = await axios.post(`${API_URL}/recommend`, {
+        base_movie_ids: [baseMovieId],
+        weights: weights, // Передаем настройки с фронта
+        top_k: 10
+      });
       setRecommendations(res.data);
     } catch (err) {
       console.error("Ошибка рекомендаций", err);
     }
   };
 
-  // 3. Функция оценки фильма (лайк)
-  const handleRate = async (movieId, ratingValue) => {
-    if (!user || !ratingValue) return;
+  const fetchStaff = async (movieId) => {
+    if (selectedStaff[movieId]) {
+        // Если уже открыто - закрываем (toggle)
+        const newStaff = { ...selectedStaff };
+        delete newStaff[movieId];
+        setSelectedStaff(newStaff);
+        return;
+    }
+
     try {
-      await axios.post(`${API_URL}/rate`, {
-        user_id: user.id,
-        movie_id: movieId,
-        rating: parseFloat(ratingValue)
-      });
-      fetchRecs(); // Обновляем список рекомендаций сразу после лайка
+      const res = await axios.get(`${API_URL}/movie/${movieId}/staff`);
+      const staff = {
+        actors: res.data.filter(s => s.professionKey === 'ACTOR').slice(0, 5),
+        directors: res.data.filter(s => s.professionKey === 'DIRECTOR')
+      };
+      setSelectedStaff(prev => ({ ...prev, [movieId]: staff }));
     } catch (err) {
-      alert("Ошибка при сохранении оценки");
+      console.error("Ошибка загрузки состава", err);
     }
   };
 
-  // 1. Новые состояния в начале компонента
-  const [constructorMovies, setConstructorMovies] = useState([]); // "Корзина" фильмов
-  const [weights, setWeights] = useState({ genres: 1, staff: 1, description: 1 });
-  const [keywords, setKeywords] = useState("");
-
-  // 2. Функция отправки запроса
-  const fetchCustomRecs = async () => {
-    const response = await fetch('http://localhost:8000/recommendations/custom', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id: user.id,
-        base_movie_ids: constructorMovies.map(m => m.id),
-        weights: weights,
-        manual_keywords: keywords
-      })
-    });
-    const data = await response.json();
-    setRecommendations(data); // Обновляем ленту рекомендаций
+  // --- AUTH HANDLERS ---
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    try {
+      const endpoint = authMode === 'login' ? '/login' : '/register';
+      const res = await axios.post(`${API_URL}${endpoint}`, authData);
+      if (authMode === 'login') {
+        localStorage.setItem('user', JSON.stringify(res.data));
+        setUser(res.data);
+      } else {
+        alert("Регистрация успешна! Теперь войдите.");
+        setAuthMode('login');
+      }
+    } catch (err) {
+      alert("Ошибка авторизации");
+    }
   };
 
-  // Загружаем рекомендации при старте
-  useEffect(() => {
-    if (user) fetchRecs();
-  }, [user]);
+  const logout = () => {
+    localStorage.removeItem('user');
+    setUser(null);
+  };
 
-  if (!user) {
-    return (
-      <div style={authContainerStyle}>
-        <div style={cardStyle}>
-          <h2>{isRegistering ? 'Регистрация' : 'Вход в CinemaRec'}</h2>
-          <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '10px'}}>
-            <input
-              placeholder="Логин (английский)"
-              pattern="^[a-zA-Z0-9_]+$"
-              title="Используйте только английские буквы, цифры и подчеркивание"
-              onChange={e => setAuthData({...authData, username: e.target.value})}
-              style={inputStyle}
-              required
-            />
-            <input
-              type="password"
-              placeholder="Пароль (минимум 6 символов)"
-              minLength="6"
-              title="Длина минимум 6 символов"
-              onChange={e => setAuthData({...authData, password: e.target.value})}
-              style={inputStyle}
-              required
-            />
-            <button type="submit" style={searchButtonStyle}>
-              {isRegistering ? 'Создать аккаунт' : 'Войти'}
-            </button>
+  // --- RENDER HELPERS ---
 
-            <button 
-              type="button"
-              onClick={() => setIsRegistering(!isRegistering)} 
-              style={{background: 'none', border: 'none', color: 'blue', cursor: 'pointer', marginTop: '10px'}}
-            >
-              {isRegistering ? 'Уже есть аккаунт? Войти' : 'Нет аккаунта? Регистрация'}  
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
-  
+  const toggleDescription = (id) => {
+    setShowDescriptions(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', backgroundColor: '#f4f4f9', minHeight: '100vh' }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
-        <h1 style={{ color: '#333', display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <Film color="#e11d48" /> CinemaRec
-        </h1>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <User size={20} />
-          <span>Привет, {user.username}!</span>
-          <button onClick={handleLogout}>Выйти</button>
+    <div style={layoutStyles.container}>
+      
+      {/* 1. SIDEBAR (ПАНЕЛЬ УПРАВЛЕНИЯ) */}
+      <aside style={{ 
+          ...layoutStyles.sidebar, 
+          width: isSidebarOpen ? '320px' : '0',
+          padding: isSidebarOpen ? '20px' : '0',
+          opacity: isSidebarOpen ? 1 : 0
+      }}>
+        <div style={layoutStyles.sidebarHeader}>
+          <h2 style={{margin: 0, display: 'flex', alignItems: 'center', gap: '10px'}}>
+             <Sliders size={20}/> Конструктор
+          </h2>
         </div>
-      </header>
 
+        {/* Блок поиска */}
+        <div style={layoutStyles.controlGroup}>
+          <label style={layoutStyles.label}>Поиск фильма</label>
+          <form onSubmit={handleSearch} style={{display: 'flex', gap: '5px'}}>
+            <input 
+              style={layoutStyles.input}
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Название..."
+            />
+            <button type="submit" style={layoutStyles.iconButton}><Search size={16}/></button>
+          </form>
+        </div>
 
-      {/* Блок рекомендаций */}
-      <section style={{ marginBottom: '40px' }}>
+        <hr style={layoutStyles.divider} />
 
-      {/* новое */}
-      {/* БЛОК КОНСТРУКТОРА */}
-        <div style={{ 
-          padding: '20px', 
-          background: '#f8fafc', 
-          borderRadius: '12px', 
-          border: '1px solid #e2e8f0',
-          marginBottom: '30px',
-          boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'
-        }}>
-          <h3 style={{ marginTop: 0, color: '#1e293b' }}>🏗️ Конструктор рекомендаций</h3>
-          <p style={{ fontSize: '14px', color: '#64748b' }}>Настройте веса и выберите фильмы-ориентиры</p>
+        {/* Блок настройки Весов */}
+        <div style={layoutStyles.controlGroup}>
+          <h4 style={layoutStyles.subHeader}>Приоритеты (Веса)</h4>
           
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '20px' }}>
-            <div>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Жанры: {weights.genres}</label>
-              <input type="range" min="1" max="10" value={weights.genres} 
-                    onChange={(e) => setWeights({...weights, genres: parseInt(e.target.value)})} 
-                    style={{ width: '100%' }} />
+          {/* Слайдер Жанров */}
+          <div style={layoutStyles.sliderContainer}>
+            <div style={layoutStyles.sliderLabel}>
+              <span>Жанры</span>
+              <span style={layoutStyles.badge}>{weights.genres}</span>
             </div>
-            <div>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Актеры/Режиссеры: {weights.staff}</label>
-              <input type="range" min="1" max="10" value={weights.staff} 
-                    onChange={(e) => setWeights({...weights, staff: parseInt(e.target.value)})} 
-                    style={{ width: '100%' }} />
-            </div>
-            <div>
-              <label style={{ display: 'block', marginBottom: '5px', fontWeight: '500' }}>Описание: {weights.description}</label>
-              <input type="range" min="1" max="10" value={weights.description} 
-                    onChange={(e) => setWeights({...weights, description: parseInt(e.target.value)})} 
-                    style={{ width: '100%' }} />
-            </div>
+            <input 
+              type="range" min="0" max="10" step="0.5"
+              value={weights.genres}
+              onChange={e => setWeights({...weights, genres: parseFloat(e.target.value)})}
+              style={layoutStyles.slider}
+            />
           </div>
 
-          <input 
-            type="text" 
-            placeholder="Добавьте ключевые слова (например: киберпанк, космос...)" 
-            value={keywords}
-            onChange={(e) => setKeywords(e.target.value)}
-            style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #cbd5e1', marginBottom: '15px', boxSizing: 'border-box' }}
-          />
-
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '15px' }}>
-            {constructorMovies.map(movie => (
-              <span key={movie.id} style={{ background: '#3b82f6', color: 'white', padding: '5px 12px', borderRadius: '20px', fontSize: '14px', display: 'flex', alignItems: 'center' }}>
-                {movie.title}
-                <button onClick={() => setConstructorMovies(constructorMovies.filter(m => m.id !== movie.id))} 
-                        style={{ background: 'none', border: 'none', color: 'white', marginLeft: '8px', cursor: 'pointer', fontWeight: 'bold' }}>×</button>
-              </span>
-            ))}
-            {constructorMovies.length === 0 && <span style={{ color: '#94a3b8', fontSize: '14px' }}>Фильмы не выбраны. Добавьте их кнопкой "В конструктор" на карточках ниже.</span>}
+          {/* Слайдер Описания */}
+          <div style={layoutStyles.sliderContainer}>
+            <div style={layoutStyles.sliderLabel}>
+              <span>Сюжет (Описание)</span>
+              <span style={layoutStyles.badge}>{weights.description}</span>
+            </div>
+            <input 
+              type="range" min="0" max="10" step="0.5"
+              value={weights.description}
+              onChange={e => setWeights({...weights, description: parseFloat(e.target.value)})}
+              style={layoutStyles.slider}
+            />
           </div>
 
-          <button onClick={fetchCustomRecs} 
-                  disabled={constructorMovies.length === 0 && !keywords}
-                  style={{ background: '#10b981', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', fontWeight: '600', cursor: 'pointer', width: '100%' }}>
-            Сгенерировать микс на основе выбранного
+          {/* Слайдер Стаффа */}
+          <div style={layoutStyles.sliderContainer}>
+            <div style={layoutStyles.sliderLabel}>
+              <span>Актеры/Режиссеры</span>
+              <span style={layoutStyles.badge}>{weights.staff}</span>
+            </div>
+            <input 
+              type="range" min="0" max="10" step="0.5"
+              value={weights.staff}
+              onChange={e => setWeights({...weights, staff: parseFloat(e.target.value)})}
+              style={layoutStyles.slider}
+            />
+          </div>
+        </div>
+
+        <hr style={layoutStyles.divider} />
+
+        {/* Место для будущих фильтров */}
+        <div style={layoutStyles.controlGroup}>
+            <h4 style={{ ...layoutStyles.subHeader, color: '#999' }}>Доп. фильтры (скоро)</h4>
+            <div style={{padding: '10px', border: '1px dashed #ccc', borderRadius: '5px', color: '#888', fontSize: '12px'}}>
+                Сюда можно добавить:<br/>
+                - Год выпуска<br/>
+                - Страна<br/>
+                - Конкретный жанр
+            </div>
+        </div>
+
+      </aside>
+
+
+      {/* 2. MAIN CONTENT (РАБОЧАЯ ОБЛАСТЬ) */}
+      <main style={layoutStyles.main}>
+        
+        {/* Верхняя шапка */}
+        <header style={layoutStyles.topBar}>
+          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} style={layoutStyles.menuButton}>
+            {isSidebarOpen ? <X size={24}/> : <Menu size={24}/>}
           </button>
-        </div>
-        {/* новое */}
+          
+          <h1 style={{fontSize: '20px', margin: 0, color: '#333'}}>Movie Matcher AI</h1>
 
-
-        <h2>Персональные рекомендации</h2>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '20px' }}>
-          {recommendations.length > 0 ? recommendations.map(movie => (
-            <div key={movie.id} style={cardStyle}>
-              <img
-                src={movie.poster_url || "https://via.placeholder.com/200x300?text=No+Poster"}
-                alt={movie.title}
-                onError={(e) => { e.target.src = "https://via.placeholder.com/200x300?text=No+Poster"; }}
-                style={{width: '100%', height: '300px', objectFit: 'cover', borderRadius: '8px'}}
-              />
-              <h3 
-                style={{ cursor: 'pointer', color: '#3b82f6', textDecoration: 'underline' }} 
-                onClick={() => fetchStaff(movie.id)}
-                title="Нажмите, чтобы увидеть актеров"
-              >
-                {movie.title}
-              </h3>
-
-              {/* Блок актеров */}
-              {selectedStaff[movie.id] ? (
-                <div style={{ 
-                  fontSize: '0.85em', 
-                  backgroundColor: '#f9f9f9', 
-                  padding: '10px', 
-                  borderRadius: '8px', 
-                  marginBottom: '10px',
-                  borderLeft: '4px solid #3b82f6' 
-                }}>
-                  {/* Режиссеры */}
-                  {selectedStaff[movie.id].directors?.length > 0 && (
-                    <div style={{ marginBottom: '5px' }}>
-                      <b>Режиссер:</b> {selectedStaff[movie.id].directors.map(d => d.nameRu || d.nameEn).join(', ')}
-                    </div>
-                  )}
-                  
-                  {/* Актеры */}
-                  {selectedStaff[movie.id].actors?.length > 0 && (
-                    <div>
-                      <b>В ролях:</b> {selectedStaff[movie.id].actors.slice(0, 5).map(a => 
-                        `${a.nameRu || a.nameEn}${a.description ? ` (${a.description})` : ''}`
-                      ).join(', ')}
-                      {selectedStaff[movie.id].actors.length > 5 && ' и др.'}
-                    </div>
-                  )}
-                </div>
-              ) : null}
-              <p style={{ fontSize: '0.8em', color: '#666' }}>{movie.genres}</p>
-              
-              <div style={{ 
-                margin: '10px 0', 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '10px',
-                justifyContent: 'space-between'
-              }}>
-                <span style={{ color: '#000000' }}>⭐ <b>{movie.average_rating || "0.0"}</b>
-                  <small>({movie.votes || 0} голосов)</small>
-                </span>
-                <span style={{ color: '#000000'}}>IMDb: <b>{movie.imdb_rating || 0}</b></span>
+          {/* Блок авторизации в шапке */}
+          <div style={{marginLeft: 'auto'}}>
+            {user ? (
+              <div style={{display: 'flex', alignItems: 'center', gap: '15px'}}>
+                <span style={{fontWeight: 'bold', color: '#2563eb'}}>{user.username}</span>
+                <button onClick={logout} style={layoutStyles.smallBtn}>Выйти</button>
               </div>
-
-
-              <select
-                onChange={(e) => handleRate(movie.id, e.target.value)}
-                style={{ padding: '8px', borderRadius: '5px', border: '1px solid #e11d48', cursor: 'pointer'}}
-              >
-                <option value="">Оценить (1-10)</option>
-                {[...Array(10)].map((_, i) => (
-                  <option key={i+1} value={i+1}>{i + 1}</option>
-                ))}
-              </select>
-
-              <button 
-                onClick={() => {
-                  // Проверка, чтобы не добавлять дубликаты
-                  if (!constructorMovies.find(m => m.id === movie.id)) {
-                    setConstructorMovies([...constructorMovies, movie]);
-                  }
-                }}
-                style={{ 
-                  marginTop: '10px', 
-                  width: '100%', 
-                  padding: '8px', 
-                  background: '#f1f5f9', 
-                  border: '1px solid #cbd5e1', 
-                  borderRadius: '6px', 
-                  cursor: 'pointer' 
-                }}
-              >
-                ✨ В конструктор
-              </button>
-
-            </div>
-          )) : <p>Оцените несколько фильмов, чтобы получить рекомендации!</p>}
-        </div>
-      </section>
-
-      <hr />
-
-      {/* Блок поиска */}
-      <section style={{ marginTop: '40px' }}>
-        <h2>Найти фильм</h2>
-        <form onSubmit={handleSearch} style={{ marginBottom: '20px', display: 'flex', gap: '10px' }}>
-          <input 
-            type="text" 
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Введите название фильма..." 
-            style={{ padding: '10px', width: '300px', borderRadius: '5px', border: '1px solid #ccc' }}
-          />
-          <button type="submit" style={searchButtonStyle}><Search size={18} /> Найти</button>
-        </form>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', gap: '20px' }}>
-          {movies.map(movie => (
-            <div key={movie.id} style={cardStyle}>
-              <img
-                src={movie.poster_url || "https://via.placeholder.com/200x300?text=No+Poster"}
-                alt={movie.title}
-                onError={(e) => { e.target.src = "https://via.placeholder.com/200x300?text=No+Poster"; }}
-                style={{width: '100%', height: '300px', objectFit: 'cover', borderRadius: '8px'}}
-              />
-              <h3 
-                style={{ cursor: 'pointer', color: '#3b82f6', textDecoration: 'underline' }} 
-                onClick={() => fetchStaff(movie.id)}
-                title="Нажмите, чтобы увидеть актеров"
-              >
-                {movie.title}
-              </h3>
-
-              {/* Блок актеров */}
-              {selectedStaff[movie.id] ? (
-                <div style={{ 
-                  fontSize: '0.85em', 
-                  backgroundColor: '#f9f9f9', 
-                  padding: '10px', 
-                  borderRadius: '8px', 
-                  marginBottom: '10px',
-                  borderLeft: '4px solid #3b82f6' 
-                }}>
-                  {/* Режиссеры */}
-                  {selectedStaff[movie.id].directors?.length > 0 && (
-                    <div style={{ marginBottom: '5px' }}>
-                      <b>Режиссер:</b> {selectedStaff[movie.id].directors.map(d => d.nameRu || d.nameEn).join(', ')}
-                    </div>
-                  )}
-                  
-                  {/* Актеры */}
-                  {selectedStaff[movie.id].actors?.length > 0 && (
-                    <div>
-                      <b>В ролях:</b> {selectedStaff[movie.id].actors.slice(0, 5).map(a => 
-                        `${a.nameRu || a.nameEn}${a.description ? ` (${a.description})` : ''}`
-                      ).join(', ')}
-                      {selectedStaff[movie.id].actors.length > 5 && ' и др.'}
-                    </div>
-                  )}
-                </div>
-              ) : null}
-              <p style={{ fontSize: '0.8em', color: '#666' }}>{movie.genres}</p>
-              
-              <div style={{ 
-                margin: '10px 0', 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '10px',
-                justifyContent: 'space-between'
-              }}>
-                <span style={{ color: '#000000' }}>⭐ <b>{movie.average_rating || "0.0"}</b>
-                  <small>({movie.votes || 0} голосов)</small>
-                </span>
-                <span style={{ color: '#000000'}}>IMDb: <b>{movie.imdb_rating || 0}</b></span>
+            ) : (
+              <div style={{display: 'flex', gap: '5px'}}>
+                <input 
+                  placeholder="Логин" value={authData.username} 
+                  onChange={e=>setAuthData({...authData, username: e.target.value})}
+                  style={layoutStyles.smallInput}
+                />
+                 <input 
+                  placeholder="Пароль" type="password" value={authData.password} 
+                  onChange={e=>setAuthData({...authData, password: e.target.value})}
+                  style={layoutStyles.smallInput}
+                />
+                <button onClick={handleAuth} style={layoutStyles.primaryBtn}>Войти</button>
               </div>
+            )}
+          </div>
+        </header>
 
-              <select
-                onChange={(e) => handleRate(movie.id, e.target.value)}
-                style={{ padding: '8px', borderRadius: '5px', border: '1px solid #e11d48', cursor: 'pointer'}}
-              >
-                <option value="">Оценить (1-10)</option>
-                {[...Array(10)].map((_, i) => (
-                  <option key={i+1} value={i+1}>{i + 1}</option>
+        {/* Область с контентом */}
+        <div style={layoutStyles.contentArea}>
+          
+          {/* Секция 1: Результаты поиска */}
+          {movies.length > 0 && (
+            <div style={layoutStyles.section}>
+              <h3 style={layoutStyles.sectionTitle}>Результаты поиска</h3>
+              <div style={layoutStyles.grid}>
+                {movies.map(movie => (
+                  <MovieCard 
+                    key={movie.id} 
+                    movie={movie} 
+                    onRecommend={() => fetchRecommendations(movie.id)}
+                    onToggleStaff={() => fetchStaff(movie.id)}
+                    onToggleDesc={() => toggleDescription(movie.id)}
+                    staffData={selectedStaff[movie.id]}
+                    showDesc={showDescriptions[movie.id]}
+                    isRecommendation={false}
+                  />
                 ))}
-              </select>
-              
-
-              <button 
-                onClick={() => {
-                  // Проверка, чтобы не добавлять дубликаты
-                  if (!constructorMovies.find(m => m.id === movie.id)) {
-                    setConstructorMovies([...constructorMovies, movie]);
-                  }
-                }}
-                style={{ 
-                  marginTop: '10px', 
-                  width: '100%', 
-                  padding: '8px', 
-                  background: '#f1f5f9', 
-                  border: '1px solid #cbd5e1', 
-                  borderRadius: '6px', 
-                  cursor: 'pointer' 
-                }}
-              >
-                ✨ В конструктор
-              </button>
-
-
+              </div>
             </div>
-          ))}
+          )}
+
+          {/* Секция 2: Рекомендации */}
+          {recommendations.length > 0 && (
+            <div style={{...layoutStyles.section, background: '#f8fafc', padding: '20px', borderRadius: '15px', marginTop: '30px'}}>
+              <h3 style={{...layoutStyles.sectionTitle, color: '#2563eb'}}>
+                 AI Рекомендации (на основе настроек слева)
+              </h3>
+              <div style={layoutStyles.grid}>
+                {recommendations.map(movie => (
+                   <MovieCard 
+                   key={movie.id} 
+                   movie={movie} 
+                   onRecommend={() => fetchRecommendations(movie.id)} // Можно искать похожее на похожее
+                   onToggleStaff={() => fetchStaff(movie.id)}
+                   onToggleDesc={() => toggleDescription(movie.id)}
+                   staffData={selectedStaff[movie.id]}
+                   showDesc={showDescriptions[movie.id]}
+                   isRecommendation={true}
+                 />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {movies.length === 0 && recommendations.length === 0 && (
+            <div style={layoutStyles.emptyState}>
+              <Film size={64} color="#ccc"/>
+              <p>Воспользуйтесь поиском слева, чтобы начать</p>
+            </div>
+          )}
+
         </div>
-      </section>
+      </main>
     </div>
   );
 }
 
-// Простые стили для карточек
+// --- КОМПОНЕНТ КАРТОЧКИ (ВЫНЕСЕН ДЛЯ ЧИСТОТЫ) ---
+const MovieCard = ({ movie, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation }) => {
+    return (
+        <div style={cardStyle.wrapper}>
+            <div style={{position: 'relative'}}>
+                 <img src={movie.poster_url || "https://via.placeholder.com/300x450"} alt={movie.title} style={cardStyle.image} />
+                 {movie.match_reason && (
+                     <div style={cardStyle.matchReason}>
+                         {movie.match_reason.split('|').map((tag, i) => (
+                             <div key={i} style={cardStyle.tag}>{tag.trim()}</div>
+                         ))}
+                     </div>
+                 )}
+            </div>
+           
+            <div style={cardStyle.content}>
+                <h4 style={cardStyle.title}>{movie.title}</h4>
+                <div style={cardStyle.meta}>
+                    <span style={{color: '#f59e0b'}}>★ {movie.imdb_rating}</span>
+                    <span style={{color: '#64748b'}}>{movie.genres ? movie.genres.split(' ').slice(0, 2).join(', ') : ''}</span>
+                </div>
+
+                {/* Кнопки действий */}
+                <div style={cardStyle.actions}>
+                    <button onClick={onToggleDesc} style={cardStyle.textBtn}>Сюжет</button>
+                    <button onClick={onToggleStaff} style={cardStyle.textBtn}>Актеры</button>
+                </div>
+
+                {/* Выпадающий текст описания */}
+                {showDesc && (
+                    <p style={cardStyle.description}>{movie.description}</p>
+                )}
+
+                {/* Выпадающий список актеров */}
+                {staffData && (
+                    <div style={cardStyle.staffList}>
+                        <strong>Режиссер:</strong> {staffData.directors.map(d=>d.nameRu).join(', ')}<br/>
+                        <strong>Актеры:</strong> {staffData.actors.map(a=>a.nameRu).join(', ')}
+                    </div>
+                )}
+
+                <button onClick={onRecommend} style={isRecommendation ? cardStyle.recButtonSecondary : cardStyle.recButton}>
+                   {isRecommendation ? "Похожие на это" : "Найти похожие"}
+                </button>
+            </div>
+        </div>
+    )
+}
+
+// --- СТИЛИ (CSS-IN-JS) ---
+
+const layoutStyles = {
+  container: {
+    display: 'flex',
+    height: '100vh',
+    width: '100%',
+    fontFamily: "'Inter', sans-serif",
+    backgroundColor: '#f1f5f9',
+    overflow: 'hidden'
+  },
+  sidebar: {
+    backgroundColor: '#ffffff',
+    borderRight: '1px solid #e2e8f0',
+    display: 'flex',
+    flexDirection: 'column',
+    transition: 'all 0.3s ease',
+    overflowY: 'auto',
+    flexShrink: 0,
+    zIndex: 10
+  },
+  sidebarHeader: {
+    marginBottom: '20px',
+    color: '#1e293b'
+  },
+  controlGroup: {
+    marginBottom: '20px'
+  },
+  label: {
+    display: 'block',
+    marginBottom: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#475569'
+  },
+  subHeader: {
+    margin: '0 0 10px 0',
+    fontSize: '14px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+    color: '#64748b'
+  },
+  input: {
+    width: '100%',
+    padding: '10px',
+    borderRadius: '6px',
+    border: '1px solid #cbd5e1',
+    outline: 'none'
+  },
+  iconButton: {
+    background: '#3b82f6',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    padding: '0 10px',
+    cursor: 'pointer'
+  },
+  divider: {
+    border: 'none',
+    borderTop: '1px solid #e2e8f0',
+    margin: '15px 0'
+  },
+  sliderContainer: {
+    marginBottom: '15px'
+  },
+  sliderLabel: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    marginBottom: '5px',
+    fontSize: '13px',
+    color: '#334155'
+  },
+  badge: {
+    background: '#eff6ff',
+    color: '#3b82f6',
+    padding: '2px 6px',
+    borderRadius: '4px',
+    fontWeight: 'bold',
+    fontSize: '12px'
+  },
+  slider: {
+    width: '100%',
+    cursor: 'pointer'
+  },
+  main: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  topBar: {
+    height: '60px',
+    backgroundColor: '#ffffff',
+    borderBottom: '1px solid #e2e8f0',
+    display: 'flex',
+    alignItems: 'center',
+    padding: '0 20px',
+    gap: '20px'
+  },
+  menuButton: {
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    color: '#64748b'
+  },
+  contentArea: {
+    flex: 1,
+    overflowY: 'auto',
+    padding: '20px'
+  },
+  section: {
+    marginBottom: '30px'
+  },
+  sectionTitle: {
+    fontSize: '18px',
+    marginBottom: '15px',
+    color: '#1e293b'
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+    gap: '20px'
+  },
+  emptyState: {
+    height: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    color: '#94a3b8'
+  },
+  smallInput: {
+    padding: '6px',
+    borderRadius: '4px',
+    border: '1px solid #ccc',
+    fontSize: '12px'
+  },
+  primaryBtn: {
+    padding: '6px 12px',
+    background: '#3b82f6',
+    color: 'white',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '12px'
+  },
+  smallBtn: {
+     padding: '6px 12px',
+     background: '#ef4444',
+     color: 'white',
+     border: 'none',
+     borderRadius: '4px',
+     cursor: 'pointer',
+     fontSize: '12px'
+  }
+};
+
 const cardStyle = {
-  backgroundColor: '#fff',
-  padding: '15px',
-  borderRadius: '10px',
-  boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-  display: 'flex',
-  flexDirection: 'column',
-  justifyContent: 'space-between'
-};
-
-const likeButtonStyle = {
-  marginTop: '10px',
-  padding: '8px',
-  backgroundColor: '#e11d48',
-  color: 'white',
-  border: 'none',
-  borderRadius: '5px',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  gap: '5px'
-};
-
-const searchButtonStyle = {
-  padding: '10px 20px',
-  backgroundColor: '#3b82f6',
-  color: 'white',
-  border: 'none',
-  borderRadius: '5px',
-  cursor: 'pointer',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '5px'
-};
-
-const authContainerStyle = {
-  display: 'flex',
-  justifyContent: 'center',
-  alignItems: 'center',
-  height: '100vh',
-  backgroundColor: '#f0f2f5'
-};
-
-const inputStyle = {
-  width: '200px',
-  padding: '10px',
-  borderRadius: '5px',
-  border: '1px solid #ccc'
+  wrapper: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    overflow: 'hidden',
+    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+    transition: 'transform 0.2s',
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%' // Чтобы карточки были одной высоты
+  },
+  image: {
+    width: '100%',
+    height: '300px',
+    objectFit: 'cover'
+  },
+  content: {
+    padding: '12px',
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1
+  },
+  title: {
+    margin: '0 0 8px 0',
+    fontSize: '15px',
+    lineHeight: '1.2'
+  },
+  meta: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    fontSize: '12px',
+    marginBottom: '10px'
+  },
+  actions: {
+    display: 'flex',
+    gap: '10px',
+    marginBottom: '10px'
+  },
+  textBtn: {
+    background: 'none',
+    border: 'none',
+    color: '#3b82f6',
+    cursor: 'pointer',
+    fontSize: '12px',
+    padding: 0,
+    textDecoration: 'underline'
+  },
+  description: {
+    fontSize: '12px',
+    color: '#475569',
+    background: '#f1f5f9',
+    padding: '8px',
+    borderRadius: '6px',
+    marginBottom: '10px'
+  },
+  staffList: {
+    fontSize: '11px',
+    color: '#475569',
+    background: '#fff7ed',
+    padding: '8px',
+    borderRadius: '6px',
+    marginBottom: '10px'
+  },
+  recButton: {
+    marginTop: 'auto',
+    width: '100%',
+    padding: '10px',
+    background: '#10b981',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: '600'
+  },
+  recButtonSecondary: {
+    marginTop: 'auto',
+    width: '100%',
+    padding: '10px',
+    background: '#6366f1',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontWeight: '600'
+  },
+  matchReason: {
+      position: 'absolute',
+      bottom: '0',
+      left: '0',
+      right: '0',
+      background: 'rgba(0,0,0,0.7)',
+      padding: '5px',
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: '4px'
+  },
+  tag: {
+      background: '#3b82f6',
+      color: 'white',
+      fontSize: '10px',
+      padding: '2px 6px',
+      borderRadius: '10px'
+  }
 };
 
 export default App;
