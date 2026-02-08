@@ -12,6 +12,8 @@ import re # Для проверки английских букв
 import pymorphy3
 import requests
 
+from sentence_transformers import SentenceTransformer, util
+
 # Добавляем импорты для работы с БД
 from sqlalchemy import create_engine, Column, Integer, String, Text, Float
 from sqlalchemy.ext.declarative import declarative_base
@@ -28,7 +30,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__ident=
 # Настройки весов для системы рекомендаций
 REC_WEIGHTS = {
     "genres": 1,      # Насколько важен жанр
-    "staff": 5,       # Насколько важны актеры/режиссеры
+    "staff": 1,       # Насколько важны актеры/режиссеры
     "description": 1  # Насколько важно текстовое описание
 }
 
@@ -92,6 +94,7 @@ class MovieStaffDB(Base):
     staff_id = Column(Integer, primary_key=True)
     profession_key = Column(String, primary_key=True) # Добавляем в ключ, т.к. один человек может быть и актером, и режиссером в одном фильме
     description = Column(String, nullable=True) # Роль (для актеров)
+    order = Column(Integer, default=999)
 
 # СОЗДАЕМ ТАБЛИЦЫ
 Base.metadata.create_all(bind=engine)
@@ -102,8 +105,22 @@ def get_data_from_db():
     # Оборачиваем строку запроса в text()
     sql_query = text("""
         SELECT 
-            m.id, m.title, m.genres, m.description,
-            string_agg(DISTINCT s.name_ru, ' ') as staff_names
+            m.id, m.title, 
+            m.genres,
+            m.description,
+            string_agg(
+                CASE 
+                    -- ПЕРВЫЕ 3 ЧЕЛОВЕКА (индексы 0, 1, 2) - 5-кратный вес
+                    WHEN ms.order <= 3 THEN REPEAT(REPLACE(s.name_ru, ' ', '_') || ' ', 2)
+                    
+                    -- СЛЕДУЮЩИЕ 3 ЧЕЛОВЕКА (индексы 3, 4, 5) - 3-кратный вес
+                    WHEN ms.order <= 6 THEN REPEAT(REPLACE(s.name_ru, ' ', '_') || ' ', 1)
+                    
+                    -- ВСЕ ОСТАЛЬНЫЕ (актеры 2-3 плана, режиссеры дальше в списке и т.д.) - 1 вес
+                    ELSE REPLACE(s.name_ru, ' ', '_')
+                END, 
+                ' '
+            ) as staff_names
         FROM movies m
         LEFT JOIN movie_staff ms ON m.id = ms.movie_id
         LEFT JOIN staff s ON ms.staff_id = s.id
@@ -117,12 +134,19 @@ def get_data_from_db():
         
         data = []
         for item in query:
+            # Склеиваем имена: "Марк Уолберг" -> "Марк_Уолберг"
+            raw_staff = item["staff_names"] if item["staff_names"] else ""
+            # Магия: заменяем пробелы между именами на подчеркивания, 
+            # но сохраняем пробелы между разными людьми
+            # Предположим, имена приходят разделенные запятой или двойным пробелом
+            # Если они разделены просто пробелом, используем логику из SQL ниже
+
             data.append({
                 "id": item["id"],
                 "title": item["title"],
                 "genres": item["genres"],
                 "description": item["description"],
-                "staff": item["staff_names"] if item["staff_names"] else ""
+                "staff": raw_staff
             })
         return pd.DataFrame(data)
     except Exception as e:
@@ -174,22 +198,51 @@ svd_model = train_svd_model()
 # Инициализируем морфологический анализатор
 morph = pymorphy3.MorphAnalyzer()
 
+custom_stop_words = russian_stopwords + [
+    'фильм', 'кино', 'история', 'сюжет', 'который', 'свой', 'весь', 
+    'это', 'год', 'жизнь', 'время', 'герой', 'режиссер', 'роль',
+    # Новые слова-паразиты (абстрактные понятия)
+    'цель', 'день', 'дело', 'случай', 'место', 'образ', 'вид', 'часть',
+    'мир', 'человек', 'друг', 'женщина', 'мужчина', 'ребенок', 'семья',
+    'путь', 'сторона', 'конец', 'начало', 'город', 'страна', 'дом',
+    'имя', 'слово', 'глаз', 'рука', 'раз', 'работа', 'помощь'
+]
+
 # Функция очистки и лемматизации
-def preprocess_text(text):
+def preprocess_text(text, keep_all=False):
     if not isinstance(text, str):
         return ""
-    # 1. Оставляем только буквы (убираем запятые, точки, цифры)
-    text = re.sub(r'[^а-яА-ЯёЁ\s]', '', text)
-    # 2. Переводим в нижний регистр
+    
+    # Очистка от спецсимволов
+    text = re.sub(r'[^а-яА-ЯёЁ\s_]', '', text)
     words = text.lower().split()
-    # 3. Лемматизация (приводим к начальной форме)
+    
     res = []
     for word in words:
         p = morph.parse(word)[0]
-        # Если слово не в стоп-листе, добавляем
-        if p.normal_form not in russian_stopwords:
+        
+        # Если это стоп-слово - пропускаем
+        if p.normal_form in custom_stop_words:
+            continue
+            
+        # ЛОГИКА ФИЛЬТРАЦИИ:
+        if keep_all:
+            # Для Жанров и Стаффа берем всё (там имена нужны)
             res.append(p.normal_form)
+        else:
+            # Для ОПИСАНИЯ берем ТОЛЬКО нарицательные существительные (NOUN)
+            # Исключаем PROPN (Имена собственные: Чарли, Москва, Борат и т.д.)
+            if p.tag.POS == 'NOUN': 
+                res.append(p.normal_form)
+            
     return " ".join(res)
+
+
+# === ЗАГРУЗКА SEMANTIC MODEL ===
+print("Загрузка нейросети (это займет время при первом запуске)...")
+# Модель для 50+ языков, отлично понимает русский
+semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
 
 # Инициализация TF-IDF на расширенных данных
 # Формируем расширенный текст для анализа с использованием весов из конфига
@@ -198,21 +251,38 @@ if not movies_df.empty:
     movies_df['staff'] = movies_df['staff'].fillna('')
     movies_df['genres'] = movies_df['genres'].fillna('')
     
-    # Собираем контент, умножая строки на веса
-    raw_content = (
-        (movies_df['genres'] + " ") * REC_WEIGHTS["genres"] + 
-        (movies_df['staff'] + " ") * REC_WEIGHTS["staff"] + 
-        movies_df['description'] * REC_WEIGHTS["description"]
-    )
+    # Подготовка данных
+    movies_df['genres_clean'] = movies_df['genres'].apply(lambda x: preprocess_text(x, keep_all=True))
+    movies_df['staff_clean'] = movies_df['staff'].apply(lambda x: preprocess_text(x, keep_all=True))
     
-    print(f"Обработка текстов (Веса: Жанры={REC_WEIGHTS['genres']}, Стафф={REC_WEIGHTS['staff']})...")
-    movies_df['content_soup'] = raw_content.apply(preprocess_text)
+    # Для объяснений (тегов) сохраняем очищенные существительные
+    movies_df['desc_keywords'] = movies_df['description'].apply(lambda x: preprocess_text(x, keep_all=False))
+
+    # 1. Векторы Жанров и Стаффа (TF-IDF эффективнее для категорий)
+    tfidf_genres = TfidfVectorizer()
+    matrix_genres = tfidf_genres.fit_transform(movies_df['genres_clean'])
     
-    tfidf = TfidfVectorizer(stop_words=None) 
-    tfidf_matrix = tfidf.fit_transform(movies_df['content_soup'])
-    cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+    tfidf_staff = TfidfVectorizer()
+    matrix_staff = tfidf_staff.fit_transform(movies_df['staff_clean'])
+    
+
+    # === НОВАЯ ВСТАВКА: TF-IDF ДЛЯ ОПИСАНИЯ ===
+    # Используем desc_keywords (там у тебя уже лежат существительные)
+    # min_df=2 уберет слишком редкие слова (опечатки)
+    print("Генерация TF-IDF для описаний...")
+    tfidf_desc = TfidfVectorizer(min_df=1, max_features=5000) 
+    matrix_desc_tfidf = tfidf_desc.fit_transform(movies_df['desc_keywords'])
+    # ==========================================
+
+
+    # 2. Векторы Описаний (SEMANTIC SEARCH)
+    print("Генерация эмбеддингов описаний...")
+    # Берем сырой текст, нейросеть сама разберется с контекстом
+    descriptions_list = movies_df['description'].tolist()
+    matrix_desc_semantic = semantic_model.encode(descriptions_list, convert_to_tensor=True, show_progress_bar=True)
+    
     indices = pd.Series(movies_df.index, index=movies_df['id']).drop_duplicates()
-    print("Улучшенная модель рекомендаций готова!")
+    print("Система готова! Используется гибридный поиск (TF-IDF + Semantic).")
 
 # Модель для запроса из "Конструктора"
 class CustomRecRequest(BaseModel):
@@ -234,7 +304,6 @@ async def get_recommendations(user_id: int):
     REC_COUNT = 10 
     db = SessionLocal()
     
-    # 1. Получаем все оценки пользователя
     ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
     watched_ids = {r.movie_id for r in ratings}
 
@@ -243,54 +312,46 @@ async def get_recommendations(user_id: int):
         db.close()
         return random_movies
 
-    # Разделяем на "Любимые" (>= 7) и "Нелюбимые" (<= 4)
     top_movies = [r.movie_id for r in ratings if r.rating >= 7][:5]
     bad_movies = [r.movie_id for r in ratings if r.rating <= 4][:5]
     
-    rec_movie_ids = []
+    total_scores = np.zeros(movies_df.shape[0])
 
-    # --- РАСЧЕТ ВЕКТОРОВ ---
-    
-    # Вектор интересов (Положительный)
-    combined_soup = ""
+    # Считаем сходство для "лайков"
     for m_id in top_movies:
         if m_id in indices:
-            combined_soup += movies_df.iloc[indices[m_id]]['content_soup'] + " "
-    
-    # Вектор анти-интересов (Отрицательный)
-    anti_soup = ""
+            idx = indices[m_id]
+            
+            # TF-IDF Similarity
+            sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+            sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
+            
+            # Semantic Similarity (возвращает Tensor, переводим в numpy)
+            base_vec = matrix_desc_semantic[idx]
+            sim_d = util.cos_sim(base_vec, matrix_desc_semantic).cpu().numpy().flatten()
+            
+            total_scores += (sim_g * REC_WEIGHTS["genres"] + 
+                             sim_s * REC_WEIGHTS["staff"] + 
+                             sim_d * REC_WEIGHTS["description"])
+
+    # Вычитаем анти-интересы
     for m_id in bad_movies:
         if m_id in indices:
-            anti_soup += movies_df.iloc[indices[m_id]]['content_soup'] + " "
+            idx = indices[m_id]
+            sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+            sim_d = util.cos_sim(matrix_desc_semantic[idx], matrix_desc_semantic).cpu().numpy().flatten()
+            # У жанров и сюжета сильный штраф, стафф меньше штрафуем
+            total_scores -= (sim_g * 1.5 + sim_d * 1.0)
 
-    if combined_soup:
-        # Сходство с тем, что НРАВИТСЯ
-        query_vec = tfidf.transform([combined_soup])
-        pos_sim_scores = linear_kernel(query_vec, tfidf_matrix).flatten()
-        
-        # Сходство с тем, что НЕ НРАВИТСЯ
-        if anti_soup:
-            anti_vec = tfidf.transform([anti_soup])
-            neg_sim_scores = linear_kernel(anti_vec, tfidf_matrix).flatten()
-            
-            # Итоговый скор: Плюс за похожесть на лайки, Минус за похожесть на дизлайки
-            # Коэффициент 0.6 означает, что дизлайки имеют сильное, но не абсолютное влияние
-            final_scores = pos_sim_scores - (neg_sim_scores * 0.6)
-        else:
-            final_scores = pos_sim_scores
-
-        # Сортируем по итоговому скору
-        combined_indices = np.argsort(final_scores)[::-1]
-        
-        added = 0
-        for idx in combined_indices:
-            m_id = int(movies_df.iloc[idx]['id'])
-            # Пропускаем уже виденное
-            if m_id not in watched_ids:
-                rec_movie_ids.append(m_id)
-                added += 1
-            if added >= REC_COUNT:
-                break
+    combined_indices = np.argsort(total_scores)[::-1]
+    
+    rec_movie_ids = []
+    for idx in combined_indices:
+        m_id = int(movies_df.iloc[idx]['id'])
+        if m_id not in watched_ids:
+            rec_movie_ids.append(m_id)
+        if len(rec_movie_ids) >= REC_COUNT:
+            break
 
     # 4. Добор через SVD (если список пуст или мал)
     if len(rec_movie_ids) < REC_COUNT and svd_model is not None:
@@ -303,26 +364,22 @@ async def get_recommendations(user_id: int):
                 break
 
     # 5. Итоговый результат (с IMDb и средним баллом)
-    results = db.query(
-        MovieDB, 
-        func.avg(RatingDB.rating).label("avg_rating"),
-        func.count(RatingDB.id).label("votes_count")
-    ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
-     .filter(MovieDB.id.in_(rec_movie_ids[:REC_COUNT]))\
-     .group_by(MovieDB.id).all()
+    # Формирование ответа
+    results = db.query(MovieDB, func.avg(RatingDB.rating).label("avg"), func.count(RatingDB.id).label("cnt"))\
+        .outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+        .filter(MovieDB.id.in_(rec_movie_ids[:REC_COUNT]))\
+        .group_by(MovieDB.id).all()
 
-    recommendations_list = []
-    for movie, avg_rating, votes_count in results:
-        recommendations_list.append({
+    final = []
+    for movie, avg, cnt in results:
+        final.append({
             "id": movie.id, "title": movie.title, "genres": movie.genres,
             "description": movie.description, "poster_url": movie.poster_url,
-            "average_rating": round(avg_rating, 1) if avg_rating else 0,
-            "votes": votes_count, "imdb_rating": movie.imdb_rating
+            "average_rating": round(avg, 1) if avg else 0, "votes": cnt, "imdb_rating": movie.imdb_rating
         })
-
-    recommendations_list.sort(key=lambda x: rec_movie_ids.index(x["id"]))
+    final.sort(key=lambda x: rec_movie_ids.index(x["id"]))
     db.close()
-    return recommendations_list
+    return final
 
        
 @app.get("/movies/{movie_id}/similar")
@@ -330,7 +387,15 @@ async def get_similar_movies(movie_id: int):
     if movie_id not in indices:
         raise HTTPException(status_code=404, detail="Movie not found")
     idx = indices[movie_id]
-    sim_scores = sorted(list(enumerate(cosine_sim[idx])), key=lambda x: x[1], reverse=True)
+    
+    # Гибридный расчет
+    sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+    sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
+    sim_d = util.cos_sim(matrix_desc_semantic[idx], matrix_desc_semantic).cpu().numpy().flatten()
+    
+    combined = sim_g + sim_s + sim_d
+    
+    sim_scores = sorted(list(enumerate(combined)), key=lambda x: x[1], reverse=True)
     movie_indices = [i[0] for i in sim_scores[1:4]]
     return movies_df.iloc[movie_indices].to_dict(orient='records')
 
@@ -494,9 +559,9 @@ async def get_movie_staff(movie_id: int):
             api_data = response.json()
             
             # Фильтруем данные
-            actors = [s for s in api_data if s['professionKey'] == 'ACTOR'][:15]
+            actors = [s for s in api_data if s['professionKey'] == 'ACTOR'][:10]
             directors = [s for s in api_data if s['professionKey'] == 'DIRECTOR']
-            writers = [s for s in api_data if s['professionKey'] == 'WRITER'][:3]
+            writers = [s for s in api_data if s['professionKey'] == 'WRITER'][:2]
             
             selected_staff = actors + directors + writers
 
@@ -516,12 +581,13 @@ async def get_movie_staff(movie_id: int):
             db.flush() 
 
             # 2. Теперь сохраняем все их роли (связи) в movie_staff
-            for s in selected_staff:
+            for idx, s in enumerate(selected_staff): # Добавили idx
                 new_relation = MovieStaffDB(
                     movie_id=movie_id,
                     staff_id=s['staffId'],
                     profession_key=s['professionKey'],
-                    description=s.get('description')
+                    description=s.get('description'),
+                    order=idx  # <--- КРИТИЧЕСКИ ВАЖНО: сохраняем порядковый номер
                 )
                 db.merge(new_relation)
             
@@ -542,94 +608,169 @@ async def get_custom_recommendations(req: CustomRecRequest):
     
     # Инициализируем массив нулей длиной в количество всех фильмов
     # Сюда будем накапливать баллы похожести
-    total_sim_scores = np.zeros(tfidf_matrix.shape[0])
+    # Инициализируем массив нулей (используем любую матрицу для размера)
+    total_scores = np.zeros(movies_df.shape[0])
     
-    # 1. Проходим по КАЖДОМУ выбранному фильму отдельно
+    w_genres = req.weights.get('genres', 1)
+    w_staff = req.weights.get('staff', 1)
+    w_desc = req.weights.get('description', 1)
+
     for m_id in req.base_movie_ids:
         if m_id in indices:
-            movie_row = movies_df.iloc[indices[m_id]]
+            idx = indices[m_id]
             
-            # Формируем индивидуальный суп для этого фильма с учетом весов
-            # Используем умножение строки для имитации веса
-            genres_part = (str(movie_row['genres']) + " ") * int(req.weights.get('genres', 1))
-            staff_part = (str(movie_row['staff']) + " ") * int(req.weights.get('staff', 1))
-            desc_part = (str(movie_row['description']) + " ") * int(req.weights.get('description', 1))
+            # TF-IDF (Быстрое точное совпадение для категорий)
+            sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+            sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
             
-            single_movie_soup = f"{genres_part} {staff_part} {desc_part}"
-            
-            # Считаем похожесть всей базы конкретно на ЭТОТ фильм
-            query_vec = tfidf.transform([single_movie_soup])
-            sim_scores = linear_kernel(query_vec, tfidf_matrix).flatten()
-            
-            # Добавляем результаты в общую копилку
-            total_sim_scores += sim_scores
+            # НОВИНКА: Если есть хоть одно совпадение по актерам, 
+            # мы возводим результат в степень 0.5 (извлекаем корень), 
+            # чтобы маленькие значения (например, 0.1) превратились в большие (0.31)
+            #sim_s = np.sqrt(sim_s)
 
-    # Если пользователь ввел ручные ключевые слова, добавляем их влияние отдельно
+            # SEMANTIC (Глубокое понимание смысла)
+            # А. Умный поиск (SBERT)
+            base_vec = matrix_desc_semantic[idx]
+            sim_d = util.cos_sim(base_vec, matrix_desc_semantic).cpu().numpy().flatten()
+            
+            # Б. Точный поиск по словам (TF-IDF) - ловит "биржу", "деньги", "акции"
+            sim_tfidf = linear_kernel(matrix_desc_tfidf[idx], matrix_desc_tfidf).flatten()
+
+            # В. Смешиваем (50/50 или 70/30)
+            # TF-IDF более резкий (много нулей), BERT более плавный.
+            # Эта комбинация вытащит фильмы с похожими СЛОВАМИ наверх.
+            sim_desc_final = (sim_d * 0.5) + (sim_tfidf * 0.5)
+
+            # Фильтр "Шум SBERT":
+            # Если семантика меньше 0.4, считаем это случайным шумом и обнуляем
+            # Это уберет "Эту дурацкую любовь" от "Волка", так как там мало общего смысла
+            sim_desc_final[sim_desc_final < 0.1] = 0
+
+            # Если жанров нет общих и вес жанра высок, штрафуем
+            # (реализуем через понижение коэффициента)
+            sim_total = (sim_g * w_genres) + (sim_s * w_staff) + (sim_desc_final * w_desc)
+            
+            # # Если жанровое сходство 0, уменьшаем итоговый балл на 20%
+            # mask_no_genre = (sim_g == 0)
+            # # ТЕКУЩИЙ КОД:
+            # # sim_total[mask_no_genre & (sim_s > 0)] *= 0.95 
+            # # sim_total[mask_no_genre & (sim_s == 0)] *= 0.8
+            
+            # # НОВЫЙ ВАРИАНТ (Более жесткий):
+            # # Если есть общий актер, штрафуем умеренно (пусть Макконахи останется)
+            # sim_total[mask_no_genre & (sim_s > 0)] *= 0.85 
+            
+            # # Если НЕТ ни жанров, ни актеров общих — убиваем рейтинг
+            # # Это уберет "Эту дурацкую любовь" из рекомендаций к "Волку"
+            # sim_total[mask_no_genre & (sim_s == 0)] *= 0.3
+            
+            # 4. ШТРАФЫ (Упрощаем)
+            # Если жанры совсем не совпали, режем балл пополам
+            mask_no_genre = (sim_g == 0)
+            sim_total[mask_no_genre] *= 0.5
+
+            total_scores += sim_total
+
+    # 1. Если пользователь ввел ключевые слова (ищем по матрице описаний)
+    # Ручные ключевые слова (через нейросеть!)
     if req.manual_keywords:
-        kw_vec = tfidf.transform([req.manual_keywords])
-        kw_scores = linear_kernel(kw_vec, tfidf_matrix).flatten()
-        # Ключевые слова влияют на результат с весом 1.5 (можно менять)
-        total_sim_scores += (kw_scores * 1.5)
+        # Нейросеть превращает "грустное кино про братьев" в вектор
+        kw_vec = semantic_model.encode(req.manual_keywords, convert_to_tensor=True)
+        kw_sim = util.cos_sim(kw_vec, matrix_desc_semantic).cpu().numpy().flatten()
+        total_scores += (kw_sim * 2.0)
 
-    # 2. Учет "Анти-интересов" (дизлайков)
-    # Здесь логика остается прежней: вычитаем то, что не нравится
-    bad_ratings = db.query(RatingDB).filter(RatingDB.user_id == req.user_id, RatingDB.rating <= 3).all()
-    if bad_ratings:
-        anti_soup = ""
-        for r in bad_ratings:
-            if r.movie_id in indices:
-                anti_soup += movies_df.iloc[indices[r.movie_id]]['content_soup'] + " "
-        if anti_soup:
-            anti_vec = tfidf.transform([anti_soup])
-            neg_scores = linear_kernel(anti_vec, tfidf_matrix).flatten()
-            total_sim_scores = total_sim_scores - (neg_scores * 0.7)
-
-    # 3. Сортировка и фильтрация
-    # argsort возвращает индексы от меньшего к большему, поэтому берем [::-1]
-    ordered_indices = np.argsort(total_sim_scores)[::-1]
-    
+    # Фильтрация
     watched_ids = {r.movie_id for r in db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()}
+    ordered_indices = np.argsort(total_scores)[::-1]
+    rec_ids = []
     
-    rec_movie_ids = []
-    # Начинаем не с 0, а с 1, так как на 0 месте часто оказывается сам фильм из запроса
-    # Но так как у нас сумма нескольких фильмов, просто фильтруем входные ID
     for idx in ordered_indices:
         m_id = int(movies_df.iloc[idx]['id'])
-        
-        # Исключаем уже просмотренные и те, что мы сами выбрали в конструктор
         if m_id not in watched_ids and m_id not in req.base_movie_ids:
-            rec_movie_ids.append(m_id)
-            
-        if len(rec_movie_ids) >= REC_COUNT:
+            rec_ids.append(m_id)
+        if len(rec_ids) >= REC_COUNT:
             break
 
-    # 4. Сбор финальных данных
-    results = db.query(
-        MovieDB, 
-        func.avg(RatingDB.rating).label("avg_rating"),
-        func.count(RatingDB.id).label("votes_count")
-    ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
-     .filter(MovieDB.id.in_(rec_movie_ids))\
-     .group_by(MovieDB.id).all()
+    # 5. Сбор данных и генерация объяснений
+    sql = text("""
+        SELECT m.id, m.title, m.genres, m.description, m.poster_url, m.imdb_rating,
+        string_agg(DISTINCT REPLACE(s.name_ru, ' ', '_'), ' ') as staff_names,
+        AVG(r.rating) as avg, COUNT(r.id) as cnt
+        FROM movies m
+        LEFT JOIN movie_staff ms ON m.id = ms.movie_id
+        LEFT JOIN staff s ON ms.staff_id = s.id
+        LEFT JOIN ratings r ON m.id = r.movie_id
+        WHERE m.id IN :ids
+        GROUP BY m.id
+    """)
 
-    recommendations_list = []
-    for movie, avg_rating, votes_count in results:
-        recommendations_list.append({
-            "id": movie.id,
-            "title": movie.title,
-            "genres": movie.genres,
-            "description": movie.description,
-            "poster_url": movie.poster_url,
-            "imdb_rating": movie.imdb_rating or 0,
-            "average_rating": round(avg_rating, 1) if avg_rating else 0,
-            "votes": votes_count
+    results = db.execute(sql, {"ids": tuple(rec_ids)}).mappings().all()
+
+    # --- ПОДГОТОВКА К ОБЪЯСНЕНИЮ ---
+    source_genres = set()
+    source_staff = set()
+    # Собираем все важные существительные из базовых фильмов (это наши "темы")
+    source_themes = set()
+
+    for m_id in req.base_movie_ids:
+        if m_id in indices:
+            row = movies_df.iloc[indices[m_id]]
+            if isinstance(row['genres'], str):
+                source_genres.update([g.strip() for g in row['genres'].split(' ')])
+            if isinstance(row['staff'], str):
+                source_staff.update([s.strip() for s in row['staff'].split(' ')])
+            # Для тем используем desc_keywords (очищенные существительные)
+            if isinstance(row['desc_keywords'], str):
+                source_themes.update(row['desc_keywords'].split())
+
+    final_recs = []
+    for row in results:
+        match_reasons = []
+        
+        # 1. Сходство по Персонам
+        movie_staff_str = row["staff_names"] if row["staff_names"] else ""
+        movie_staff_set = set(movie_staff_str.split(' '))
+        staff_intersect = list(source_staff.intersection(movie_staff_set))
+        if staff_intersect:
+            names = [n.replace('_', ' ') for n in staff_intersect if n and n != ""]
+            if names:
+                match_reasons.append(f"Персоны: {', '.join(names[:2])}")
+
+        # 2. Сходство по Жанрам
+        movie_genres_str = row["genres"] if row["genres"] else ""
+        movie_genres_set = set(movie_genres_str.split(' '))
+        genre_intersect = list(source_genres.intersection(movie_genres_set))
+        if genre_intersect:
+            match_reasons.append(f"Жанры: {', '.join(genre_intersect[:2])}")
+            
+        # 3. Сходство по Темам (самое интересное)
+        # Сравниваем существительные из базовых фильмов с текущим
+        current_movie_themes = set(preprocess_text(row["description"], keep_all=False).split())
+        theme_intersect = list(source_themes.intersection(current_movie_themes))
+        
+        # Если нашли общие темы, которые не являются стоп-словами
+        if theme_intersect:
+            # Берем максимум 3 общих слова для пояснения
+            match_reasons.append(f"Темы: {', '.join(theme_intersect[:3])}")
+
+        # Если совпадений нет вообще (редко, но бывает)
+        reason_text = " | ".join(match_reasons) if match_reasons else "Схожая атмосфера"
+
+        final_recs.append({
+            "id": row["id"],
+            "title": row["title"],
+            "genres": row["genres"],
+            "description": row["description"],
+            "poster_url": row["poster_url"],
+            "imdb_rating": row["imdb_rating"] or 0,
+            "average_rating": round(row["avg"], 1) if row["avg"] else 0, # Тут было avg_rating
+            "votes": int(row["cnt"]), # Тут было votes_count
+            "match_reason": reason_text
         })
 
-    # Восстанавливаем порядок
-    recommendations_list.sort(key=lambda x: rec_movie_ids.index(x["id"]))
-    
+    final_recs.sort(key=lambda x: rec_ids.index(x["id"]))
     db.close()
-    return recommendations_list
+    return final_recs
 
 if __name__ == "__main__":
     import uvicorn
