@@ -46,13 +46,16 @@ function App() {
   // --- API FUNCTIONS ---
 
   // Обычный поиск по названию (TF-IDF title)
-  const handleSearch = async (e) => {
-    e.preventDefault();
-    if (!search.trim()) return;
+  const handleSearch = async () => {
+    if (!search) return;
     try {
-      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`); // Исправил query -> title (как в main.py)
+      // БЕРЕМ ID ПОЛЬЗОВАТЕЛЯ
+      const userId = user ? user.id : 0;
+      
+      // ОТПРАВЛЯЕМ ЕГО НА СЕРВЕР
+      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${userId}`);
+      
       setMovies(res.data);
-      setRecommendations([]); 
     } catch (err) {
       console.error("Ошибка поиска", err);
     }
@@ -387,28 +390,32 @@ function App() {
   );
 }
 
-const StarRating = ({ userRating, onRate }) => {
+// В пропсах теперь userRating, чтобы имена совпадали
+const StarRating = ({ userRating, onRate }) => { 
   const [hover, setHover] = React.useState(0);
 
   return (
     <div style={{ display: 'flex', gap: '2px', marginBottom: '10px' }}>
       {[...Array(10)].map((_, index) => {
         const ratingValue = index + 1;
-        // Используем константу isActive для всего: и для цвета, и для заливки
-        const isActive = ratingValue <= (hover || userRating || 0);
         
+        // Логика: звезда горит, если мы навели мышь ИЛИ если есть сохраненная оценка
+        const isActive = ratingValue <= (hover || userRating || 0);
+
         return (
           <button
             key={index}
             style={{
               background: 'none', border: 'none', cursor: 'pointer', padding: 0,
-              color: isActive ? '#f59e0b' : '#e2e8f0', // Исправлено: теперь цвет зависит от isActive
+              // Меняем цвет самой звездочки
+              color: isActive ? '#f59e0b' : '#e2e8f0', 
               transition: 'color 0.2s'
             }}
             onClick={() => onRate(ratingValue)}
             onMouseEnter={() => setHover(ratingValue)}
             onMouseLeave={() => setHover(0)}
           >
+            {/* fill также зависит от активности */}
             <Star size={14} fill={isActive ? '#f59e0b' : 'none'} />
           </button>
         );
