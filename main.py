@@ -479,11 +479,12 @@ async def create_user(user_data: UserCreate):
     db.close()
     return new_user
 
+# Найти эндпоинт @app.get("/search") и заменить его на этот:
 @app.get("/search")
-async def search_movies(title: str, user_id: int = 0): # Добавили user_id
+async def search_movies(title: str, user_id: int = 0): # Добавляем необязательный user_id
     db = SessionLocal()
     
-    # 1. Получаем общую информацию о фильмах
+    # 1. Получаем фильмы и общую статистику (средний балл и кол-во голосов)
     results = db.query(
         MovieDB, 
         func.avg(RatingDB.rating).label("avg_rating"),
@@ -492,7 +493,7 @@ async def search_movies(title: str, user_id: int = 0): # Добавили user_i
      .filter(MovieDB.title.ilike(f"%{title}%"))\
      .group_by(MovieDB.id).all()
     
-    # 2. Получаем оценки конкретно этого пользователя
+    # 2. Получаем персональные оценки текущего пользователя
     user_ratings_map = {}
     if user_id > 0:
         u_ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
@@ -502,7 +503,7 @@ async def search_movies(title: str, user_id: int = 0): # Добавили user_i
     
     movies_with_ratings = []
     for movie, avg_rating, votes_count in results:
-        movies_with_ratings.append({
+        m_dict = {
             "id": movie.id,
             "title": movie.title,
             "genres": movie.genres,
@@ -511,8 +512,10 @@ async def search_movies(title: str, user_id: int = 0): # Добавили user_i
             "average_rating": round(avg_rating, 1) if avg_rating else 0,
             "votes": votes_count,
             "imdb_rating": movie.imdb_rating,
-            "user_rating": user_ratings_map.get(movie.id, 0) # ПЕРЕДАЕМ ОЦЕНКУ
-        })
+            # ДОБАВЛЯЕМ ЭТУ СТРОКУ:
+            "user_rating": user_ratings_map.get(movie.id, 0) 
+        }
+        movies_with_ratings.append(m_dict)
         
     return movies_with_ratings
 
