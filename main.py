@@ -433,6 +433,7 @@ async def rate_movie(data: RatingCreate):
         movie = db.query(MovieDB).filter(MovieDB.id == data.movie_id).first()
         if not movie:
             db.close()
+            print("Фильм не найден")
             raise HTTPException(status_code=404, detail="Фильм не найден")
 
         new_rating_obj = RatingDB(user_id=data.user_id, movie_id=data.movie_id, rating=data.rating)
