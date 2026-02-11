@@ -46,16 +46,13 @@ function App() {
   // --- API FUNCTIONS ---
 
   // Обычный поиск по названию (TF-IDF title)
-  const handleSearch = async () => {
-    if (!search) return;
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!search.trim()) return;
     try {
-      // БЕРЕМ ID ПОЛЬЗОВАТЕЛЯ
-      const userId = user ? user.id : 0;
-      
-      // ОТПРАВЛЯЕМ ЕГО НА СЕРВЕР
-      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${userId}`);
-      
+      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`); // Исправил query -> title (как в main.py)
       setMovies(res.data);
+      setRecommendations([]); 
     } catch (err) {
       console.error("Ошибка поиска", err);
     }
@@ -192,8 +189,8 @@ function App() {
         m.id === movieId ? { 
           ...m, 
           user_rating: score, // Ставим "нашу" оценку для звезд
-          average_rating: res.data.average_rating, // Обновляем общий балл сайта
-          votes: res.data.votes 
+          average_rating: res.data.new_local_rating, 
+          votes: res.data.total_votes
         } : m
       );
 
@@ -365,6 +362,7 @@ function App() {
                    <MovieCard 
                    key={movie.id} 
                    movie={movie} 
+                   onRate={handleRate}
                    onRecommend={() => fetchRecommendations(movie.id)} 
                    onToggleStaff={() => fetchStaff(movie.id)}
                    onToggleDesc={() => toggleDescription(movie.id)}
@@ -425,7 +423,7 @@ const StarRating = ({ userRating, onRate }) => {
 };
 
 // --- КОМПОНЕНТ КАРТОЧКИ ---
-const MovieCard = ({ movie, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation }) => {
+const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation }) => {
     return (
         <div style={cardStyle.wrapper}>
             <div style={{position: 'relative'}}>
