@@ -1,7 +1,21 @@
-# 1. Игнорируем ВСЁ в корневой директории
+# --- Игнорируем всё в корне, кроме разрешённого ---
 /*
 
-# 2. Разрешаем только эти файлы/папки
+# Разрешаем явно:
 !/main.py
 !/movie-frontend/
 !/.gitignore
+!/requirements.txt
+
+# Но внутри movie-frontend/ игнорируем только мусор:
+movie-frontend/node_modules/
+movie-frontend/dist/
+movie-frontend/.env
+
+# Глобальный мусор
+__pycache__/
+*.pyc
+venv/
+.env
+*.log
+.DS_Store
