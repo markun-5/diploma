@@ -18,6 +18,8 @@ function App() {
   const [authMode, setAuthMode] = useState('login'); 
   const [authData, setAuthData] = useState({ username: '', password: '' });
   
+  const [showAuthModal, setShowAuthModal] = useState(!JSON.parse(localStorage.getItem('user')));
+
   const [weights, setWeights] = useState({
     genres: 5,
     staff: 2,
@@ -129,12 +131,14 @@ function App() {
       if (authMode === 'login') {
         localStorage.setItem('user', JSON.stringify(res.data));
         setUser(res.data);
+        setShowAuthModal(false);
       } else {
         alert("Регистрация успешна! Теперь войдите.");
         setAuthMode('login');
+        setAuthData({ username: '', password: '' });
       }
     } catch (err) {
-      alert("Ошибка авторизации");
+      alert(err.response?.data?.detail || "Ошибка авторизации");
     }
   };
 
@@ -205,6 +209,84 @@ function App() {
   return (
     <div style={layoutStyles.container}>
       
+      {/* AUTH MODAL OVERLAY */}
+      {showAuthModal && (
+        <div style={modalStyles.overlay}>
+          <div style={modalStyles.modal}>
+            <button
+              onClick={() => setShowAuthModal(false)}
+              style={modalStyles.closeBtn}
+            >
+              <X size={20} />
+            </button>
+
+            <h2 style={modalStyles.title}>
+              {authMode === 'login' ? 'Вход в систему' : 'Регистрация'}
+            </h2>
+
+            <form onSubmit={handleAuth} style={modalStyles.form}>
+              <div style={modalStyles.inputGroup}>
+                <label style={modalStyles.label}>Логин</label>
+                <input
+                  type="text"
+                  value={authData.username}
+                  onChange={(e) => setAuthData({...authData, username: e.target.value})}
+                  style={modalStyles.input}
+                  placeholder="Введите логин"
+                  required
+                />
+              </div>
+
+              <div style={modalStyles.inputGroup}>
+                <label style={modalStyles.label}>Пароль</label>
+                <input
+                  type="password"
+                  value={authData.password}
+                  onChange={(e) => setAuthData({...authData, password: e.target.value})}
+                  style={modalStyles.input}
+                  placeholder="Введите пароль"
+                  required
+                />
+              </div>
+
+              <button type="submit" style={modalStyles.submitBtn}>
+                {authMode === 'login' ? 'Войти' : 'Создать аккаунт'}
+              </button>
+            </form>
+
+            <div style={modalStyles.switchText}>
+              {authMode === 'login' ? (
+                <>
+                  Нет аккаунта?{' '}
+                  <span
+                    style={modalStyles.link}
+                    onClick={() => {
+                      setAuthMode('register');
+                      setAuthData({ username: '', password: '' });
+                    }}
+                  >
+                    Зарегистрироваться
+                  </span>
+                </>
+              ) : (
+                <>
+                  Уже есть аккаунт?{' '}
+                  <span
+                    style={modalStyles.link}
+                    onClick={() => {
+                      setAuthMode('login');
+                      setAuthData({ username: '', password: '' });
+                    }}
+                  >
+                    Войти
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 1. SIDEBAR */}
       <aside style={{ 
           ...layoutStyles.sidebar, 
@@ -316,11 +398,7 @@ function App() {
                 <button onClick={logout} style={layoutStyles.smallBtn}>Выйти</button>
               </div>
             ) : (
-              <div style={{display: 'flex', gap: '5px'}}>
-                <input placeholder="Логин" value={authData.username} onChange={e=>setAuthData({...authData, username: e.target.value})} style={layoutStyles.smallInput}/>
-                 <input placeholder="Пароль" type="password" value={authData.password} onChange={e=>setAuthData({...authData, password: e.target.value})} style={layoutStyles.smallInput}/>
-                <button onClick={handleAuth} style={layoutStyles.primaryBtn}>Войти</button>
-              </div>
+              <button onClick={() => setShowAuthModal(true)} style={layoutStyles.primaryBtn}>Войти</button>
             )}
           </div>
         </header>
@@ -449,10 +527,7 @@ const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, st
                     <span style={{color: '#64748b', fontSize: '11px', textAlign: 'right'}}>{movie.genres ? movie.genres.split(' ').slice(0, 2).join(', ') : ''}</span>
                 </div>
 
-                <div style={cardStyle.actions}>
-                    <button onClick={onToggleDesc} style={cardStyle.textBtn}>Сюжет</button>
-                    <button onClick={onToggleStaff} style={cardStyle.textBtn}>Актеры</button>
-                </div>
+                
 
                 {/* ПЕРСОНАЛЬНЫЕ ЗВЕЗДЫ */}
                 <div style={{margin: '10px 0'}}>
@@ -522,6 +597,94 @@ const layoutStyles = {
   primaryBtn: { padding: '6px 12px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' },
   smallBtn: { padding: '6px 12px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' },
   magicButton: { width: '100%', padding: '10px', background: 'linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', marginTop: '5px' }
+};
+
+const modalStyles = {
+  overlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000
+  },
+  modal: {
+    backgroundColor: 'white',
+    borderRadius: '12px',
+    padding: '30px',
+    width: '100%',
+    maxWidth: '400px',
+    position: 'relative',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'
+  },
+  closeBtn: {
+    position: 'absolute',
+    top: '10px',
+    right: '10px',
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    color: '#64748b',
+    padding: '5px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  title: {
+    margin: '0 0 20px 0',
+    fontSize: '24px',
+    color: '#1e293b',
+    textAlign: 'center'
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '15px'
+  },
+  inputGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px'
+  },
+  label: {
+    fontSize: '14px',
+    fontWeight: '600',
+    color: '#475569'
+  },
+  input: {
+    padding: '12px',
+    borderRadius: '6px',
+    border: '1px solid #cbd5e1',
+    fontSize: '14px',
+    outline: 'none'
+  },
+  submitBtn: {
+    padding: '12px',
+    background: '#3b82f6',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '16px',
+    fontWeight: '600',
+    marginTop: '10px'
+  },
+  switchText: {
+    marginTop: '20px',
+    textAlign: 'center',
+    fontSize: '14px',
+    color: '#64748b'
+  },
+  link: {
+    color: '#3b82f6',
+    cursor: 'pointer',
+    fontWeight: '600',
+    textDecoration: 'underline'
+  }
 };
 
 const cardStyle = {
