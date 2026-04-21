@@ -72,9 +72,6 @@ class UserDB(Base):
     username = Column(String, unique=True, index=True)
     password = Column(String)
 
-class UserCreate(BaseModel):
-    username: str
-
 class UserAuth(BaseModel):
     username: str
     password: str
@@ -464,22 +461,6 @@ async def rate_movie(data: RatingCreate):
         "total_votes": res_count
         }
 
-@app.post("/users")
-async def create_user(user_data: UserCreate):
-    db = SessionLocal()
-    # Проверяем, нет ли уже такого имени
-    exists = db.query(UserDB).filter(UserDB.username == user_data.username).first()
-    if exists:
-        db.close()
-        raise HTTPException(status_code=400, detail="Пользователь уже существует")
-    
-    new_user = UserDB(username=user_data.username)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    db.close()
-    return new_user
-
 @app.get("/search")
 async def search_movies(title: str, user_id: int = 0): # 1. Добавили аргумент user_id
     db = SessionLocal()
@@ -639,6 +620,36 @@ async def get_custom_recommendations(req: CustomRecRequest):
     db = SessionLocal()
     REC_COUNT = 10
     
+    # ПРОВЕРКА: Если входные данные пусты (нет фильмов и нет ключевых слов)
+    # Возвращаем ТОП популярных фильмов по IMDb рейтингу
+    if not req.base_movie_ids and not req.manual_keywords:
+        results = db.query(
+            MovieDB,
+            func.avg(RatingDB.rating).label("avg"),
+            func.count(RatingDB.id).label("cnt")
+        ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+         .group_by(MovieDB.id)\
+         .order_by(MovieDB.imdb_rating.desc())\
+         .limit(REC_COUNT).all()
+
+        final = []
+        for movie, avg, cnt in results:
+            final.append({
+                "id": movie.id,
+                "title": movie.title,
+                "genres": movie.genres,
+                "description": movie.description,
+                "poster_url": movie.poster_url,
+                "average_rating": round(avg, 1) if avg else 0,
+                "votes": cnt,
+                "imdb_rating": movie.imdb_rating,
+                "match_reason": "Популярное",
+                "user_rating": 0
+            })
+        db.close()
+        return final
+
+
     # Инициализируем массив нулей длиной в количество всех фильмов
     # Сюда будем накапливать баллы похожести
     # Инициализируем массив нулей (используем любую матрицу для размера)
