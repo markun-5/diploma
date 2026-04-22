@@ -1,21 +1,41 @@
-# --- Игнорируем всё в корне, кроме разрешённого ---
-/*
-
-# Разрешаем явно:
-!/main.py
-!/movie-frontend/
-!/.gitignore
-!/requirements.txt
-
-# Но внутри movie-frontend/ игнорируем только мусор:
-movie-frontend/node_modules/
-movie-frontend/dist/
-movie-frontend/.env
-
-# Глобальный мусор
+```
+# Dependencies
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.venv/
 venv/
+env/
 .env
+.env.local
+*.env*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
 *.log
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+```
