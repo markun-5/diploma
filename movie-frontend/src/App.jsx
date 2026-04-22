@@ -9,6 +9,7 @@ function App() {
   const [movies, setMovies] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
   const [search, setSearch] = useState("");
+  const [selectedMovie, setSelectedMovie] = useState(null); // Выбранный фильм для поиска похожих
   
   // Новое состояние для поиска по смыслу (через веса)
   const [smartSearchQuery, setSmartSearchQuery] = useState(""); 
@@ -20,6 +21,11 @@ function App() {
   
   const [showAuthModal, setShowAuthModal] = useState(!JSON.parse(localStorage.getItem('user')));
 
+  // Состояния для загрузки рекомендаций от разных источников
+  const [loading, setLoading] = useState({my: false, ai: false, kp: false});
+  const [activeSource, setActiveSource] = useState('my_algo'); // какой источник сейчас отображается
+  const [sourceError, setSourceError] = useState(null); // ошибка текущего источника
+  
   const [weights, setWeights] = useState({
     genres: 5,
     staff: 2,
@@ -87,6 +93,16 @@ function App() {
   // Поиск похожих на конкретный фильм
   const fetchRecommendations = async (baseMovieId) => {
     try {
+      // Устанавливаем выбранный фильм как "якорь" для внешних источников
+      // Получаем полную информацию о фильме из search эндпоинта
+      const searchRes = await axios.get(`${API_URL}/search`, {
+        params: { title: baseMovieId, user_id: user ? user.id : 0 }
+      });
+      
+      // Если нашли фильм по ID (через поиск по названию может не сработать)
+      // Используем упрощенный подход - просто сохраняем ID
+      setSelectedMovie({ id: baseMovieId });
+      
       const res = await axios.post(`${API_URL}/recommendations/custom`, {
         user_id: user ? user.id : 0,
         base_movie_ids: [baseMovieId],
@@ -125,6 +141,28 @@ function App() {
   // --- AUTH HANDLERS ---
   const handleAuth = async (e) => {
     e.preventDefault();
+    
+    // Валидация на фронтенде перед отправкой
+    const usernamePattern = /^[a-zA-Z0-9_-]+$/;
+    const passwordPattern = /^[a-zA-Z0-9_-]+$/;
+    
+    if (!usernamePattern.test(authData.username)) {
+      alert("Логин может содержать только английские буквы, цифры, - и _");
+      return;
+    }
+    if (authData.username.length < 3 || authData.username.length > 20) {
+      alert("Длина логина должна быть от 3 до 20 символов");
+      return;
+    }
+    if (!passwordPattern.test(authData.password)) {
+      alert("Пароль может содержать только английские буквы, цифры, - и _");
+      return;
+    }
+    if (authData.password.length < 6 || authData.password.length > 50) {
+      alert("Длина пароля должна быть от 6 до 50 символов");
+      return;
+    }
+    
     try {
       const endpoint = authMode === 'login' ? '/login' : '/register';
       const res = await axios.post(`${API_URL}${endpoint}`, authData);
@@ -145,6 +183,51 @@ function App() {
   const logout = () => {
     localStorage.removeItem('user');
     setUser(null);
+  };
+
+  // --- ЗАГРУЗКА РЕКОМЕНДАЦИЙ ОТ РАЗНЫХ ИСТОЧНИКОВ ---
+  const loadRecommendations = async (source) => {
+    setActiveSource(source);
+    setSourceError(null);
+    
+    // Устанавливаем флаг загрузки для конкретного источника
+    setLoading(prev => ({ ...prev, [source]: true }));
+    
+    try {
+      let res;
+      if (source === 'my_algo') {
+        // Моя система - используем существующий эндпоинт
+        res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
+        setMovies(res.data);
+        setRecommendations([]);
+      } else if (source === 'kinopoisk') {
+        // Кинопоиск - передаем anchor_movie_id если фильм выбран
+        const params = { user_id: user ? user.id : 0 };
+        if (selectedMovie && selectedMovie.id) {
+          params.anchor_movie_id = selectedMovie.id;
+        }
+        res = await axios.get(`${API_URL}/api/recommendations/kinopoisk`, { params });
+        setRecommendations(res.data);
+        setMovies([]);
+      } else if (source === 'qwen_ai') {
+        // AI (Qwen) - передаем anchor_movie_id если фильм выбран
+        const payload = { user_id: user ? user.id : 0 };
+        if (selectedMovie && selectedMovie.id) {
+          payload.anchor_movie_id = selectedMovie.id;
+        }
+        res = await axios.post(`${API_URL}/api/recommendations/external-ai`, payload);
+        setRecommendations(res.data);
+        setMovies([]);
+      }
+    } catch (err) {
+      console.error(`Ошибка загрузки из ${source}:`, err);
+      setSourceError({
+        source,
+        message: err.response?.data?.detail || `Не удалось загрузить рекомендации от ${source === 'kinopoisk' ? 'Кинопоиска' : 'AI'}`
+      });
+    } finally {
+      setLoading(prev => ({ ...prev, [source]: false }));
+    }
   };
 
   // --- HELPERS ---
@@ -365,6 +448,48 @@ function App() {
             </button>
         </div>
 
+        <hr style={layoutStyles.divider} />
+
+        {/* 4. КНОПКИ ИСТОЧНИКОВ РЕКОМЕНДАЦИЙ */}
+        <div style={layoutStyles.controlGroup}>
+          <h4 style={layoutStyles.subHeader}>Источники рекомендаций</h4>
+          <div style={{display: 'flex', flexDirection: 'column', gap: '8px'}}>
+            <button 
+              onClick={() => loadRecommendations('my_algo')} 
+              disabled={loading.my}
+              style={{
+                ...layoutStyles.sourceBtn,
+                background: activeSource === 'my_algo' ? '#3b82f6' : '#e2e8f0',
+                color: activeSource === 'my_algo' ? 'white' : '#475569'
+              }}
+            >
+              🧠 Моя система {loading.my && '⏳'}
+            </button>
+            <button 
+              onClick={() => loadRecommendations('qwen_ai')} 
+              disabled={loading.ai}
+              style={{
+                ...layoutStyles.sourceBtn,
+                background: activeSource === 'qwen_ai' ? '#8b5cf6' : '#e2e8f0',
+                color: activeSource === 'qwen_ai' ? 'white' : '#475569'
+              }}
+            >
+              🤖 AI (Qwen) {loading.ai && '⏳'}
+            </button>
+            <button 
+              onClick={() => loadRecommendations('kinopoisk')} 
+              disabled={loading.kp}
+              style={{
+                ...layoutStyles.sourceBtn,
+                background: activeSource === 'kinopoisk' ? '#10b981' : '#e2e8f0',
+                color: activeSource === 'kinopoisk' ? 'white' : '#475569'
+              }}
+            >
+              🎬 Кинопоиск {loading.kp && '⏳'}
+            </button>
+          </div>
+        </div>
+
       </aside>
 
 
@@ -433,8 +558,24 @@ function App() {
           {recommendations.length > 0 && (
             <div id="rec-section" style={{...layoutStyles.section, background: '#f8fafc', padding: '20px', borderRadius: '15px', marginTop: '30px', border: '2px solid #e2e8f0'}}>
               <h3 style={{...layoutStyles.sectionTitle, color: '#2563eb', display: 'flex', alignItems: 'center', gap: '10px'}}>
-                 <Sparkles size={20} /> AI Подборка
+                 <Sparkles size={20} /> AI Подборка 
+                 {activeSource === 'kinopoisk' && 'от Кинопоиска'}
+                 {activeSource === 'qwen_ai' && 'от Qwen AI'}
               </h3>
+              
+              {/* Отображение ошибки загрузки */}
+              {sourceError && sourceError.source !== 'my_algo' && (
+                <div style={{background: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', padding: '12px', borderRadius: '8px', marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                  <span>{sourceError.message}</span>
+                  <button 
+                    onClick={() => loadRecommendations(sourceError.source)}
+                    style={{background: '#dc2626', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer'}}
+                  >
+                    Повторить
+                  </button>
+                </div>
+              )}
+              
               <div style={layoutStyles.grid}>
                 {recommendations.map(movie => (
                    <MovieCard 
@@ -447,6 +588,7 @@ function App() {
                    staffData={selectedStaff[movie.id]}
                    showDesc={showDescriptions[movie.id]}
                    isRecommendation={true}
+                   source={movie.source || activeSource}
                  />
                 ))}
               </div>
@@ -501,7 +643,14 @@ const StarRating = ({ userRating, onRate }) => {
 };
 
 // --- КОМПОНЕНТ КАРТОЧКИ ---
-const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation }) => {
+const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation, source }) => {
+    // Определяем бейдж источника
+    const sourceBadge = {
+        'kinopoisk': { icon: '🎬', label: 'Кинопоиск', color: '#10b981' },
+        'qwen_ai': { icon: '🤖', label: 'AI', color: '#8b5cf6' },
+        'my_algo': { icon: '🧠', label: 'Моя система', color: '#3b82f6' }
+    }[source] || { icon: '🧠', label: '', color: '#3b82f6' };
+
     return (
         <div style={cardStyle.wrapper}>
             <div style={{position: 'relative'}}>
@@ -511,7 +660,15 @@ const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, st
                     onError={(e) => { e.target.src = "https://via.placeholder.com/300x450?text=Нет+постера"; }}
                     style={cardStyle.image} 
                  />
-                 {movie.match_reason && (
+                 
+                 {/* Бейдж источника рекомендации */}
+                 {source && (
+                     <div style={{...cardStyle.sourceBadge, background: sourceBadge.color}}>
+                         {sourceBadge.icon} {sourceBadge.label}
+                     </div>
+                 )}
+                 
+                 {movie.match_reason && !movie.reason && (
                      <div style={cardStyle.matchReason}>
                          {movie.match_reason.split('|').map((tag, i) => (
                              <div key={i} style={cardStyle.tag}>{tag.trim()}</div>
@@ -537,6 +694,13 @@ const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, st
                     onRate={(score) => onRate(movie.id, score)} 
                   />
                 </div>
+
+                {/* Поле reason для AI рекомендаций */}
+                {movie.reason && (
+                    <div style={cardStyle.aiReason}>
+                        <strong>💡 Почему рекомендуется:</strong> {movie.reason}
+                    </div>
+                )}
 
                 <div style={cardStyle.actions}>
                     <button onClick={onToggleDesc} style={cardStyle.textBtn}>Сюжет</button>
