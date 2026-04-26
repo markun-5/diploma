@@ -10,6 +10,7 @@ function App() {
   const [recommendations, setRecommendations] = useState([]);
   const [search, setSearch] = useState("");
   const [selectedMovie, setSelectedMovie] = useState(null); // Выбранный фильм для поиска похожих
+  const [anchorMovie, setAnchorMovie] = useState(null); // Якорный фильм для отображения плашки
   
   // Новое состояние для поиска по смыслу (через веса)
   const [smartSearchQuery, setSmartSearchQuery] = useState(""); 
@@ -101,7 +102,9 @@ function App() {
       
       // Если нашли фильм по ID (через поиск по названию может не сработать)
       // Используем упрощенный подход - просто сохраняем ID
-      setSelectedMovie({ id: baseMovieId });
+      const movieInfo = searchRes.data && searchRes.data.length > 0 ? searchRes.data[0] : { id: baseMovieId };
+      setSelectedMovie(movieInfo);
+      setAnchorMovie(movieInfo); // Сохраняем якорный фильм для отображения плашки
       
       const res = await axios.post(`${API_URL}/recommendations/custom`, {
         user_id: user ? user.id : 0,
@@ -205,15 +208,17 @@ function App() {
         const params = { user_id: user ? user.id : 0 };
         if (selectedMovie && selectedMovie.id) {
           params.anchor_movie_id = selectedMovie.id;
+          console.log(`DEBUG KP Frontend: Передаю anchor_movie_id=${selectedMovie.id}`);
         }
         res = await axios.get(`${API_URL}/api/recommendations/kinopoisk`, { params });
         setRecommendations(res.data);
         setMovies([]);
       } else if (source === 'qwen_ai') {
-        // AI (Qwen) - передаем anchor_movie_id если фильм выбран
+        // AI (DeepSeek) - передаем anchor_movie_id если фильм выбран
         const payload = { user_id: user ? user.id : 0 };
         if (selectedMovie && selectedMovie.id) {
           payload.anchor_movie_id = selectedMovie.id;
+          console.log(`DEBUG AI Frontend: Передаю anchor_movie_id=${selectedMovie.id}`);
         }
         res = await axios.post(`${API_URL}/api/recommendations/external-ai`, payload);
         setRecommendations(res.data);
@@ -221,6 +226,7 @@ function App() {
       }
     } catch (err) {
       console.error(`Ошибка загрузки из ${source}:`, err);
+      console.error(`DEBUG Error details:`, err.response?.data);
       setSourceError({
         source,
         message: err.response?.data?.detail || `Не удалось загрузить рекомендации от ${source === 'kinopoisk' ? 'Кинопоиска' : 'AI'}`
@@ -474,7 +480,7 @@ function App() {
                 color: activeSource === 'qwen_ai' ? 'white' : '#475569'
               }}
             >
-              🤖 AI (Qwen) {loading.ai && '⏳'}
+              🤖 AI (DeepSeek) {loading.ai && '⏳'}
             </button>
             <button 
               onClick={() => loadRecommendations('kinopoisk')} 
@@ -560,8 +566,26 @@ function App() {
               <h3 style={{...layoutStyles.sectionTitle, color: '#2563eb', display: 'flex', alignItems: 'center', gap: '10px'}}>
                  <Sparkles size={20} /> AI Подборка 
                  {activeSource === 'kinopoisk' && 'от Кинопоиска'}
-                 {activeSource === 'qwen_ai' && 'от Qwen AI'}
+                 {activeSource === 'qwen_ai' && 'от DeepSeek AI'}
               </h3>
+              
+              {/* Плашка с якорным фильмом и кнопкой сброса */}
+              {anchorMovie && (
+                <div style={{background: '#eff6ff', padding: '10px', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', border: '1px solid #bfdbfe'}}>
+                  <span style={{color: '#1e40af', fontSize: '14px'}}>🔍 Похожие на: <b>{anchorMovie.title || `фильм #${anchorMovie.id}`}</b></span>
+                  <button 
+                    onClick={() => {
+                      setAnchorMovie(null);
+                      setSelectedMovie(null);
+                      setRecommendations([]);
+                      loadRecommendations('my_algo');
+                    }} 
+                    style={{background: '#ef4444', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '13px'}}
+                  >
+                    ✕ Сбросить
+                  </button>
+                </div>
+              )}
               
               {/* Отображение ошибки загрузки */}
               {sourceError && sourceError.source !== 'my_algo' && (
@@ -645,9 +669,11 @@ const StarRating = ({ userRating, onRate }) => {
 // --- КОМПОНЕНТ КАРТОЧКИ ---
 const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation, source }) => {
     // Определяем бейдж источника
+    // Проверяем, является ли это fallback-подборкой (по тексту reason)
+    const isFallback = movie.reason && movie.reason.includes("AI временно недоступен");
     const sourceBadge = {
         'kinopoisk': { icon: '🎬', label: 'Кинопоиск', color: '#10b981' },
-        'qwen_ai': { icon: '🤖', label: 'AI', color: '#8b5cf6' },
+        'qwen_ai': { icon: isFallback ? '⚠️🤖' : '🤖', label: isFallback ? 'AI (fallback)' : 'AI', color: '#8b5cf6' },
         'my_algo': { icon: '🧠', label: 'Моя система', color: '#3b82f6' }
     }[source] || { icon: '🧠', label: '', color: '#3b82f6' };
 
