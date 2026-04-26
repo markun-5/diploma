@@ -26,6 +26,8 @@ function App() {
   const [activeSource, setActiveSource] = useState('my_algo'); // какой источник сейчас отображается
   const [sourceError, setSourceError] = useState(null); // ошибка текущего источника
 
+  const [anchorMovie, setAnchorMovie] = useState(null); // Якорный фильм для отображения плашки
+
   const [weights, setWeights] = useState({
     genres: 5,
     staff: 2,
@@ -102,7 +104,9 @@ function App() {
 
       // Если нашли фильм по ID (через поиск по названию может не сработать)
       // Используем упрощенный подход - просто сохраняем ID
-      setSelectedMovie({ id: baseMovieId });
+      const movieInfo = searchRes.data && searchRes.data.length > 0 ? searchRes.data[0] : { id: baseMovieId };
+      setSelectedMovie(movieInfo);
+      setAnchorMovie(movieInfo); // Сохраняем якорный фильм для отображения плашки
 
       const res = await axios.post(`${API_URL}/recommendations/custom`, {
         user_id: user ? user.id : 0,
@@ -567,6 +571,24 @@ function App() {
                  {activeSource === 'qwen_ai' && 'от DeepSeek AI'}
               </h3>
 
+              {/* Плашка с якорным фильмом и кнопкой сброса */}
+              {anchorMovie && (
+                <div style={{background: '#eff6ff', padding: '10px', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px', border: '1px solid #bfdbfe'}}>
+                  <span style={{color: '#1e40af', fontSize: '14px'}}>🔍 Похожие на: <b>{anchorMovie.title || `фильм #${anchorMovie.id}`}</b></span>
+                  <button
+                    onClick={() => {
+                      setAnchorMovie(null);
+                      setSelectedMovie(null);
+                      setRecommendations([]);
+                      loadRecommendations('my_algo');
+                    }}
+                    style={{background: '#ef4444', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '13px'}}
+                  >
+                    ✕ Сбросить
+                  </button>
+                </div>
+              )}
+
               {/* Отображение ошибки загрузки */}
               {sourceError && sourceError.source !== 'my_algo' && (
                 <div style={{background: '#fef2f2', border: '1px solid #fecaca', color: '#dc2626', padding: '12px', borderRadius: '8px', marginBottom: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
@@ -650,10 +672,12 @@ const StarRating = ({ userRating, onRate }) => {
 // const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation }) => {
 
 const MovieCard = ({ movie, onRate, onRecommend, onToggleStaff, onToggleDesc, staffData, showDesc, isRecommendation, source }) => {
-    // Определяем бейдж источника
+  // Проверяем, является ли это fallback-подборкой (по тексту reason)
+    const isFallback = movie.reason && movie.reason.includes("AI временно недоступен");  
+  // Определяем бейдж источника
     const sourceBadge = {
         'kinopoisk': { icon: '🎬', label: 'Кинопоиск', color: '#10b981' },
-        'qwen_ai': { icon: '🤖', label: 'AI', color: '#8b5cf6' },
+        'qwen_ai': { icon: isFallback ? '⚠️🤖' : '🤖', label: isFallback ? 'AI (fallback)' : 'AI', color: '#8b5cf6' },
         'my_algo': { icon: '🧠', label: 'Моя система', color: '#3b82f6' }
     }[source] || { icon: '🧠', label: '', color: '#3b82f6' };
     return (
