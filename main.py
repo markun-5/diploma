@@ -486,14 +486,28 @@ async def rate_movie(data: RatingCreate):
 async def search_movies(title: str, user_id: int = 0): # 1. Добавили аргумент user_id
     db = SessionLocal()
     
-    # 2. Ищем фильмы
-    results = db.query(
+    # Лемматизируем поисковый запрос для морфологического поиска
+    lemmatized_title = preprocess_text(title, keep_all=True)
+    title_tokens = lemmatized_title.split() if lemmatized_title else [title]
+
+    # 2. Ищем фильмы - используем ILIKE с токенами для морфологического поиска
+    from sqlalchemy import or_
+    query = db.query(
         MovieDB, 
         func.avg(RatingDB.rating).label("avg_rating"),
         func.count(RatingDB.id).label("votes_count")
-    ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
-     .filter(MovieDB.title.ilike(f"%{title}%"))\
-     .group_by(MovieDB.id).all()
+    ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)
+
+    # Если есть лемматизированные токены - ищем по ним
+    if title_tokens and len(title_tokens) > 0 and title_tokens[0]:
+        # Строим условие поиска: фильм должен содержать хотя бы один из токенов
+        conditions = [MovieDB.title.ilike(f"%{token}%") for token in title_tokens]
+        query = query.filter(or_(*conditions))
+    else:
+        # Fallback на обычный поиск
+        query = query.filter(MovieDB.title.ilike(f"%{title}%"))
+
+    results = query.group_by(MovieDB.id).all()
     
     # 3. Достаем оценки пользователя (если он вошел)
     user_ratings_map = {}
@@ -907,8 +921,32 @@ async def fetch_kinopoisk_similars(client: httpx.AsyncClient, film_id: int):
         results = []
         for film in films:
             reason = f"Похож на «{anchor_title}»" if anchor_title else "Популярный фильм"
+
+            # Проверяем наличие фильма в БД и добавляем если нет
+            film_id_kp = film.get("filmId")
+            db_add = SessionLocal()
+            existing_movie = db_add.query(MovieDB).filter(MovieDB.id == film_id_kp).first()
+
+            if not existing_movie and film_id_kp:
+                # Добавляем новый фильм в БД
+                new_movie = MovieDB(
+                    id=film_id_kp,
+                    title=film.get("nameRu") or film.get("titleRu") or "Unknown",
+                    genres="",
+                    description="",
+                    poster_url=film.get("posterUrlPreview") or film.get("posterUrl"),
+                    imdb_rating=film.get("rating") or 0.0,
+                    local_rating=0.0,
+                    votes_count=0
+                )
+                db_add.add(new_movie)
+                db_add.commit()
+                print(f"DEBUG KP: Добавлен фильм в БД: {new_movie.title} (ID: {film_id_kp})")
+
+            db_add.close()
+
             results.append({
-                "id": film.get("filmId"),
+                "id": film_id_kp,
                 "title": film.get("nameRu") or film.get("titleRu"),
                 "poster_url": film.get("posterUrlPreview") or film.get("posterUrl"),
                 "genres": None,
@@ -1033,9 +1071,21 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
     for film_id, data in seen.items():
         item = data["item"].copy()
         item.pop("_anchor_id", None)
-
+    # Если reason ещё не установлен (или это мульти-якорь), устанавливаем корректный
         if data["count"] >= 2:
-            item["reason"] = f"Рекомендуется несколькими источниками (похож на фильмы: {', '.join(map(str, data['anchors']))})"
+            # Получаем названия якорных фильмов для красивого reason
+            db_reason = SessionLocal()
+            anchor_titles = []
+            for anchor_id in data["anchors"]:
+                anchor_movie = db_reason.query(MovieDB).filter(MovieDB.id == anchor_id).first()
+                if anchor_movie:
+                    anchor_titles.append(anchor_movie.title)
+            db_reason.close()
+
+            if anchor_titles:
+                item["reason"] = f"Похож на: {', '.join([f'«{t}»' for t in anchor_titles])}"
+            else:
+                item["reason"] = "Рекомендуется несколькими источниками"
 
         unique_results.append(item)
 
@@ -1103,7 +1153,7 @@ async def get_external_ai_recommendations(req: ExternalAIRequest):
                 [{{"id": 123, "title": "Название", "year": 2020, "imdb_rating": 7.5, "genres": "боевик, драма", "description": "Краткое описание", "reason": "Почему рекомендуется"}}]
                 Если не знаешь точный ID, используй уникальные отрицательные числа (например -1, -2...)."""
 
-    # 4. Запрос к DeepSeek API
+    # 4. Запрос к DeepSeek API с fallback на популярные фильмы
     try:
         print(f"DEBUG DeepSeek: Отправка запроса к {DEEPSEEK_BASE_URL}")
         print(f"DEBUG DeepSeek: Промпт: {prompt[:500]}...")
@@ -1157,12 +1207,41 @@ async def get_external_ai_recommendations(req: ExternalAIRequest):
                 raise HTTPException(status_code=500, detail=f"AI вернул некорректный JSON: {str(e)}")
 
     except httpx.HTTPStatusError as e:
-        print(f"DEBUG DeepSeek: HTTP ошибка: {e.response.status_code} - {e.response.text}")
-        raise HTTPException(status_code=e.response.status_code, detail=f"DeepSeek API error: {e.response.text}")
+        print(f"⚠️ DeepSeek API error: {e.response.status_code} - {e.response.text}")
+        # Fallback на популярные фильмы при ошибке API
+        return get_fallback_popular_movies()
     except Exception as e:
-        print(f"DEBUG DeepSeek: Общая ошибка: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Ошибка AI сервиса: {str(e)}")
+        print(f"⚠️ DeepSeek API error: {str(e)}")
+        # Fallback на популярные фильмы при любой ошибке
+        return get_fallback_popular_movies()
 
+    # except httpx.HTTPStatusError as e:
+    #     print(f"DEBUG DeepSeek: HTTP ошибка: {e.response.status_code} - {e.response.text}")
+    #     raise HTTPException(status_code=e.response.status_code, detail=f"DeepSeek API error: {e.response.text}")
+    # except Exception as e:
+    #     print(f"DEBUG DeepSeek: Общая ошибка: {str(e)}")
+    #     raise HTTPException(status_code=500, detail=f"Ошибка AI сервиса: {str(e)}")
+
+def get_fallback_popular_movies():
+    """Возвращает популярные фильмы при недоступности DeepSeek API"""
+    db = SessionLocal()
+    try:
+        results = db.query(MovieDB).order_by(MovieDB.imdb_rating.desc()).limit(10).all()
+        final_recs = []
+        for movie in results:
+            final_recs.append({
+                "id": movie.id,
+                "title": movie.title,
+                "poster_url": movie.poster_url,
+                "genres": movie.genres,
+                "imdb_rating": movie.imdb_rating,
+                "description": movie.description,
+                "reason": "🤖 AI временно недоступен (популярная подборка)",
+                "source": "qwen_ai"  # Для совместимости с фронтендом
+            })
+        return final_recs
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     import uvicorn
