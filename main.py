@@ -11,6 +11,8 @@ from passlib.context import CryptContext
 import re # Для проверки английских букв
 import pymorphy3
 import requests
+import os
+
 import httpx
 import asyncio
 from datetime import datetime, timedelta
@@ -525,13 +527,13 @@ async def register(data: UserAuth):
         raise HTTPException(status_code=400, detail="Логин может содержать только английские буквы, цифры, - и _")
     if len(data.username) < 3 or len(data.username) > 20:
         raise HTTPException(status_code=400, detail="Длина логина должна быть от 3 до 20 символов")
-    
+
     # Валидация пароля: длина 6-50, только a-zA-Z0-9_-
     if not re.match(r"^[a-zA-Z0-9_-]+$", data.password):
         raise HTTPException(status_code=400, detail="Пароль может содержать только английские буквы, цифры, - и _")
     if len(data.password) < 6 or len(data.password) > 50:
         raise HTTPException(status_code=400, detail="Длина пароля должна быть от 6 до 50 символов")
-    
+
     db = SessionLocal()
 
     # Проверка на уникальность
@@ -552,14 +554,15 @@ async def register(data: UserAuth):
 
 @app.post("/login")
 async def login(data: UserAuth):
+
     # Валидация логина
     if not re.match(r"^[a-zA-Z0-9_-]+$", data.username):
         raise HTTPException(status_code=400, detail="Логин может содержать только английские буквы, цифры, - и _")
-    
+
     # Валидация пароля
     if not re.match(r"^[a-zA-Z0-9_-]+$", data.password):
         raise HTTPException(status_code=400, detail="Пароль может содержать только английские буквы, цифры, - и _")
-    
+
     db = SessionLocal()
     user = db.query(UserDB).filter(UserDB.username == data.username).first()
     db.close()
@@ -854,6 +857,7 @@ async def get_custom_recommendations(req: CustomRecRequest):
     db.close()
     return final_recs
 
+
 # ==========================================
 # НОВЫЕ ЭНДПОИНТЫ ДЛЯ ВНЕШНИХ ИСТОЧНИКОВ
 # ==========================================
@@ -871,7 +875,7 @@ def get_top_rated_movies(user_id: int, limit: int = 2):
             RatingDB.user_id == user_id,
             RatingDB.rating >= 7
         ).order_by(RatingDB.rating.desc()).limit(limit).all()
-        
+
         return [r.movie_id for r in top_ratings]
     finally:
         db.close()
@@ -882,20 +886,27 @@ async def fetch_kinopoisk_similars(client: httpx.AsyncClient, film_id: int):
         url = f"https://kinopoiskapiunofficial.tech/api/v2.2/films/{film_id}/similars"
         headers = {"X-API-KEY": KINOPOISK_API_KEY}
         response = await client.get(url, headers=headers)
-        
+
         print(f"DEBUG KP: Запрос к filmId={film_id}, статус: {response.status_code}")
-        
+
         if response.status_code != 200:
             print(f"DEBUG KP: Ошибка API для filmId={film_id}: {response.text[:200]}")
             return []
-        
+
         api_data = response.json()
         films = api_data.get("items", [])
-        
+
         print(f"DEBUG KP: Получено {len(films)} похожих фильмов для filmId={film_id}")
-        
+
+        # Получаем название якорного фильма для reason
+        db = SessionLocal()
+        anchor_movie = db.query(MovieDB).filter(MovieDB.id == film_id).first()
+        anchor_title = anchor_movie.title if anchor_movie else None
+        db.close()
+
         results = []
         for film in films:
+            reason = f"Похож на «{anchor_title}»" if anchor_title else "Популярный фильм"
             results.append({
                 "id": film.get("filmId"),
                 "title": film.get("nameRu") or film.get("titleRu"),
@@ -903,33 +914,39 @@ async def fetch_kinopoisk_similars(client: httpx.AsyncClient, film_id: int):
                 "genres": None,
                 "imdb_rating": film.get("rating"),
                 "description": None,
-                "reason": f"Похож на фильм {film_id}",
+                "reason": reason,
                 "source": "kinopoisk",
                 "_anchor_id": film_id
             })
-        
+
         return results
     except Exception as e:
         print(f"DEBUG KP: Исключение при запросе filmId={film_id}: {str(e)}")
         return []
 
+
 @app.get("/api/recommendations/kinopoisk")
 async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[int] = None):
     """
     Получение рекомендаций от Кинопоиска с поддержкой мульти-якоря.
+    Если передан anchor_movie_id — используется ТОЛЬКО он.
+    Если нет — берём ТОП-2 по оценкам пользователя.
     """
     # 1. Собираем якорные фильмы
     anchor_ids = set()
-    
+
+     # ВАЖНО: Если пользователь явно выбрал фильм (anchor_movie_id), используем ТОЛЬКО его
     if anchor_movie_id:
         anchor_ids.add(anchor_movie_id)
         print(f"DEBUG KP: Используется пользовательский якорь: {anchor_movie_id}")
+    else:
+        # Если якорь не указан, берём ТОП из оценок пользователя
+        top_movies = get_top_rated_movies(user_id, limit=2)
+        for m_id in top_movies:
+            anchor_ids.add(m_id)
+            print(f"DEBUG KP: Добавлен якорь из ТОП оценок: {m_id}")
     
-    top_movies = get_top_rated_movies(user_id, limit=2)
-    for m_id in top_movies:
-        anchor_ids.add(m_id)
-        print(f"DEBUG KP: Добавлен якорь из ТОП оценок: {m_id}")
-    
+
     if not anchor_ids:
         print("DEBUG KP: Нет якорных фильмов, берем популярные")
         try:
@@ -937,11 +954,11 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
                 url = "https://kinopoiskapiunofficial.tech/api/v2.2/films/collections/type/top_popular_movies"
                 headers = {"X-API-KEY": KINOPOISK_API_KEY}
                 response = await client.get(url, headers=headers)
-                
+
                 if response.status_code == 200:
                     data = response.json()
                     items = data.get("items", [])[:10]
-                    
+
                     results = []
                     for film in items:
                         results.append({
@@ -957,13 +974,13 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
                     return results
         except Exception as e:
             print(f"DEBUG KP: Ошибка при получении популярных фильмов: {e}")
-        
+
         raise HTTPException(status_code=400, detail="Не удалось определить якорные фильмы")
-    
+
     now = datetime.now()
     all_results = []
     anchors_to_fetch = []
-    
+
     for a_id in anchor_ids:
         cache_key = f"kp_{a_id}"
         if cache_key in kinopoisk_cache:
@@ -975,17 +992,17 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
                 anchors_to_fetch.append(a_id)
         else:
             anchors_to_fetch.append(a_id)
-    
+
     if anchors_to_fetch:
         print(f"DEBUG KP: Делаем запросы для якорей: {anchors_to_fetch}")
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 tasks = [fetch_kinopoisk_similars(client, fid) for fid in anchors_to_fetch]
                 fetched_results = await asyncio.gather(*tasks)
-                
+
                 for results in fetched_results:
                     all_results.extend(results)
-                
+
                 for i, a_id in enumerate(anchors_to_fetch):
                     cache_key = f"kp_{a_id}"
                     kinopoisk_cache[cache_key] = {
@@ -995,13 +1012,13 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
         except Exception as e:
             print(f"DEBUG KP: Ошибка при параллельных запросах: {e}")
             raise HTTPException(status_code=503, detail=f"Ошибка соединения с Кинопоиском: {str(e)}")
-    
+
     seen = {}
     for item in all_results:
         film_id = item.get("id")
         if film_id is None:
             continue
-        
+
         if film_id not in seen:
             seen[film_id] = {
                 "item": item,
@@ -1011,124 +1028,139 @@ async def get_kinopoisk_recommendations(user_id: int, anchor_movie_id: Optional[
         else:
             seen[film_id]["count"] += 1
             seen[film_id]["anchors"].add(item.get("_anchor_id"))
-    
+
     unique_results = []
     for film_id, data in seen.items():
         item = data["item"].copy()
         item.pop("_anchor_id", None)
-        
+
         if data["count"] >= 2:
             item["reason"] = f"Рекомендуется несколькими источниками (похож на фильмы: {', '.join(map(str, data['anchors']))})"
-        
+
         unique_results.append(item)
-    
+
     unique_results.sort(key=lambda x: (-sum(1 for r in all_results if r.get("id") == x["id"]), x.get("title", "")))
-    
+
     final_results = unique_results[:12]
-    
+
     print(f"DEBUG KP: Возвращаем {len(final_results)} уникальных фильмов из {len(all_results)} полученных")
-    
+
     return final_results
 
+
+# DeepSeek API конфигурация
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-13008908463341d99e453521659e99bd")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 @app.post("/api/recommendations/external-ai")
 async def get_external_ai_recommendations(req: ExternalAIRequest):
     """
-    Получение рекомендаций от AI (Qwen или заглушка).
+    Получение рекомендаций от AI (DeepSeek).
     """
     db = SessionLocal()
-    
+
     # 1. Собираем данные о пользователе
     user_ratings = db.query(RatingDB).filter(RatingDB.user_id == req.user_id).all()
-    
+
     # Топ фильмы (оценка >= 7)
     top_movies = [r.movie_id for r in user_ratings if r.rating >= 7][:5]
     # Низкие оценки (оценка <= 4)
     low_movies = [r.movie_id for r in user_ratings if r.rating <= 4][:5]
-    
+
     # Собираем жанры из топ фильмов
     top_genres = set()
     for m_id in top_movies:
         movie = db.query(MovieDB).filter(MovieDB.id == m_id).first()
         if movie and movie.genres:
             top_genres.update(movie.genres.split())
-    
+
     db.close()
-    
+
     # 2. Определяем anchor_movie_id если не указан
     anchor_movie_id = req.anchor_movie_id
     if not anchor_movie_id and top_movies:
         anchor_movie_id = top_movies[0]
-    
+
     # Получаем информацию о якорном фильме для контекста
     anchor_context = ""
+    anchor_title = ""
     if anchor_movie_id:
         db2 = SessionLocal()
         anchor_movie = db2.query(MovieDB).filter(MovieDB.id == anchor_movie_id).first()
         if anchor_movie:
+            anchor_title = anchor_movie.title
             anchor_context = f"Особенно похож на: {anchor_movie.title}."
         db2.close()
-    
+
     # 3. Формируем промпт
     prompt = f"""Порекомендуй 10 фильмов для пользователя.
-Интересы (жанры): {', '.join(top_genres) if top_genres else 'не указаны'}.
-Любимые фильмы (ID): {top_movies}.
-Избегай (низкие оценки, ID): {low_movies}.
-{anchor_context}
-Верни ТОЛЬКО JSON массив в формате:
-[{{"id": 123, "title": "Название", "year": 2020, "imdb_rating": 7.5, "genres": "боевик, драма", "description": "Краткое описание", "reason": "Почему рекомендуется"}}]
-Если не знаешь точный ID, используй уникальные отрицательные числа (например -1, -2...)."""
+                Интересы (жанры): {', '.join(top_genres) if top_genres else 'не указаны'}.
+                Любимые фильмы (ID): {top_movies}.
+                Избегай (низкие оценки, ID): {low_movies}.
+                {anchor_context}
+                Верни ТОЛЬКО JSON массив в формате:
+                [{{"id": 123, "title": "Название", "year": 2020, "imdb_rating": 7.5, "genres": "боевик, драма", "description": "Краткое описание", "reason": "Почему рекомендуется"}}]
+                Если не знаешь точный ID, используй уникальные отрицательные числа (например -1, -2...)."""
 
-    # 4. Запрос к Qwen API (или заглушка)
+    # 4. Запрос к DeepSeek API
     try:
-        # Попытка запроса к Qwen (раскомментируйте если есть API ключ)
-        # async with httpx.AsyncClient(timeout=30.0) as client:
-        #     headers = {"Authorization": "Bearer YOUR_QWEN_API_KEY"}
-        #     payload = {
-        #         "model": "qwen-plus",
-        #         "messages": [{"role": "user", "content": prompt}],
-        #         "temperature": 0.7
-        #     }
-        #     response = await client.post("https://api.qwen.ai/v1/chat/completions", json=payload, headers=headers)
-        #     response.raise_for_status()
-        #     ai_response = response.json()["choices"][0]["message"]["content"]
-        
-        # ЗАГЛУШКА (так как API ключа нет)
-        await asyncio.sleep(1)  # Имитация задержки
-        
-        # Генерируем фейковые рекомендации на основе данных из БД
-        db3 = SessionLocal()
-        fake_recs = []
-        
-        # Берем фильмы схожих жанров
-        if top_genres:
-            genre_filter = "%".join(list(top_genres)[:2]) if top_genres else ""
-            similar_movies = db3.query(MovieDB).filter(
-                MovieDB.genres.ilike(f"%{genre_filter}%") if genre_filter else True
-            ).order_by(MovieDB.imdb_rating.desc()).limit(10).all()
-        else:
-            similar_movies = db3.query(MovieDB).order_by(func.random()).limit(10).all()
-        
-        for i, movie in enumerate(similar_movies):
-            fake_recs.append({
-                "id": movie.id,
-                "title": movie.title,
-                "poster_url": movie.poster_url,
-                "genres": movie.genres,
-                "imdb_rating": movie.imdb_rating,
-                "description": movie.description[:200] + "..." if movie.description and len(movie.description) > 200 else movie.description,
-                "reason": f"AI рекомендует: подходит по жанрам и стилю. {anchor_context}",
-                "source": "qwen_ai"
-            })
-        
-        db3.close()
-        
-        if not fake_recs:
-            raise HTTPException(status_code=500, detail="Не удалось получить рекомендации от AI")
-        
-        return fake_recs
-        
+        print(f"DEBUG DeepSeek: Отправка запроса к {DEEPSEEK_BASE_URL}")
+        print(f"DEBUG DeepSeek: Промпт: {prompt[:500]}...")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}"}
+            payload = {
+                "model": DEEPSEEK_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7
+            }
+            response = await client.post(f"{DEEPSEEK_BASE_URL}/v1/chat/completions", json=payload, headers=headers)
+            response.raise_for_status()
+            ai_response = response.json()["choices"][0]["message"]["content"]
+
+            print(f"DEBUG DeepSeek: Ответ API: {ai_response[:500]}...")
+
+            # Парсим JSON ответ
+            import json
+            try:
+                # Пытаемся найти JSON в ответе (если там есть лишние символы)
+                start_idx = ai_response.find("[")
+                end_idx = ai_response.rfind("]") + 1
+                if start_idx >= 0 and end_idx > start_idx:
+                    json_str = ai_response[start_idx:end_idx]
+                    recommendations = json.loads(json_str)
+                else:
+                    recommendations = json.loads(ai_response)
+
+                # Добавляем poster_url и source из БД
+                db3 = SessionLocal()
+                final_recs = []
+                for rec in recommendations:
+                    movie = db3.query(MovieDB).filter(MovieDB.id == rec.get("id")).first()
+                    final_recs.append({
+                        "id": rec.get("id"),
+                        "title": rec.get("title", "Неизвестно"),
+                        "poster_url": movie.poster_url if movie else None,
+                        "genres": rec.get("genres"),
+                        "imdb_rating": rec.get("imdb_rating"),
+                        "description": rec.get("description"),
+                        "reason": rec.get("reason", f"AI рекомендует: {anchor_context}"),
+                        "source": "deepseek_ai"
+                    })
+                db3.close()
+
+                return final_recs
+
+            except json.JSONDecodeError as e:
+                print(f"DEBUG DeepSeek: Ошибка парсинга JSON: {e}")
+                raise HTTPException(status_code=500, detail=f"AI вернул некорректный JSON: {str(e)}")
+
+    except httpx.HTTPStatusError as e:
+        print(f"DEBUG DeepSeek: HTTP ошибка: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"DeepSeek API error: {e.response.text}")
     except Exception as e:
+        print(f"DEBUG DeepSeek: Общая ошибка: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка AI сервиса: {str(e)}")
 
 
