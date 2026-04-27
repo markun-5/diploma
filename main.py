@@ -15,6 +15,7 @@ import os
 
 import httpx
 import asyncio
+import os
 from datetime import datetime, timedelta
 
 from sentence_transformers import SentenceTransformer, util
@@ -486,6 +487,9 @@ async def rate_movie(data: RatingCreate):
 @app.get("/search")
 async def search_movies(title: str, user_id: int = 0):
     db = SessionLocal()
+    # Лемматизируем поисковый запрос для морфологического поиска
+    lemmatized_title = preprocess_text(title, keep_all=True)
+    title_tokens = lemmatized_title.split() if lemmatized_title else [title]
     
     # Лемматизируем поисковый запрос для морфологического поиска
     lemmatized_title = preprocess_text(title, keep_all=True)
@@ -517,6 +521,16 @@ async def search_movies(title: str, user_id: int = 0):
 
     results = query.group_by(MovieDB.id).all()
     
+    # Если есть лемматизированные токены - ищем по ним
+    if title_tokens and len(title_tokens) > 0 and title_tokens[0]:
+        # Строим условие поиска: фильм должен содержать хотя бы один из токенов
+        conditions = [MovieDB.title.ilike(f"%{token}%") for token in title_tokens]
+        query = query.filter(or_(*conditions))
+    else:
+        # Fallback на обычный поиск
+        query = query.filter(MovieDB.title.ilike(f"%{title}%"))
+    
+    results = query.group_by(MovieDB.id).all()
     # 3. Достаем оценки пользователя (если он вошел)
     user_ratings_map = {}
     if user_id > 0:
