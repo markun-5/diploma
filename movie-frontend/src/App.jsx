@@ -463,7 +463,7 @@ function App() {
                 Поиск по смыслу
             </label>
             <textarea 
-                style={{...layoutStyles.input, minHeight: '60px', marginBottom: '10px', fontSize: '13px'}}
+                style={{...layoutStyles.input, minHeight: '60px', resize: 'none', marginBottom: '10px', fontSize: '13px'}}
                 placeholder="Например: грустный фильм про космос и одиночество..."
                 value={smartSearchQuery}
                 onChange={e => setSmartSearchQuery(e.target.value)}
