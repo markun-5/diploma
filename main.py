@@ -15,7 +15,6 @@ import os
 
 import httpx
 import asyncio
-import os
 from datetime import datetime, timedelta
 
 from sentence_transformers import SentenceTransformer, util
@@ -426,7 +425,24 @@ async def get_recommendations(user_id: int):
     db.close()
     return final
 
-       
+
+@app.get("/movies/{movie_id}")
+async def get_movie_by_id(movie_id: int):
+    """Получить фильм по ID (для отображения якорного фильма)"""
+    db = SessionLocal()
+    movie = db.query(MovieDB).filter(MovieDB.id == movie_id).first()
+    db.close()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    return {
+        "id": movie.id,
+        "title": movie.title,
+        "poster_url": movie.poster_url,
+        "genres": movie.genres,
+        "description": movie.description,
+        "imdb_rating": movie.imdb_rating
+    }
+
 @app.get("/movies/{movie_id}/similar")
 async def get_similar_movies(movie_id: int):
     if movie_id not in indices:
@@ -487,13 +503,13 @@ async def rate_movie(data: RatingCreate):
 @app.get("/search")
 async def search_movies(title: str, user_id: int = 0):
     db = SessionLocal()
-    # Лемматизируем поисковый запрос для морфологического поиска
-    lemmatized_title = preprocess_text(title, keep_all=True)
-    title_tokens = lemmatized_title.split() if lemmatized_title else [title]
     
-    # Лемматизируем поисковый запрос для морфологического поиска
+    # Лемматизируем весь поисковый запрос целиком (а не только токены)
     lemmatized_title = preprocess_text(title, keep_all=True)
-    title_tokens = lemmatized_title.split() if lemmatized_title else [title]
+    lemma_tokens = lemmatized_title.split() if lemmatized_title else []
+
+    # Оригинальные токены для fallback-поиска
+    original_tokens = title.split() if title else []
 
     # 2. Ищем фильмы - используем ILIKE с токенами для морфологического поиска
     from sqlalchemy import or_
@@ -503,34 +519,37 @@ async def search_movies(title: str, user_id: int = 0):
         func.count(RatingDB.id).label("votes_count")
     ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)
 
-    # Если есть лемматизированные токены - ищем по ним
-    if title_tokens and len(title_tokens) > 0 and title_tokens[0]:
-        # Строим условие поиска: фильм должен содержать хотя бы один из токенов
-        conditions = []
-        for token in title_tokens:
-            # Для коротких слов (<4 символов) используем поиск по префиксу
-            # Для длинных слов (>=4 символов) используем поиск по подстроке
-            if len(token) < 4:
-                conditions.append(MovieDB.title.ilike(f"{token}%"))
-            else:
+    # Строим условие поиска: фильм должен содержать хотя бы один из токенов
+    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: ищем по лемме + по всем словоформам леммы
+    conditions = []
+
+    for lemma_token in lemma_tokens:
+        if len(lemma_token) >= 3:
+            # Получаем все возможные формы слова через pymorphy3
+            try:
+                parsed = morph.parse(lemma_token)[0]
+                # Добавляем поиск по каждой форме слова
+                for form in parsed.lexeme:
+                    word_form = form.word
+                    conditions.append(MovieDB.title.ilike(f"%{word_form}%"))
+            except Exception:
+                # Fallback на простую лемму если ошибка
+                conditions.append(MovieDB.title.ilike(f"%{lemma_token}%"))
+
+    # Fallback: если лемм нет, пробуем по оригинальным токенам
+    if not conditions and original_tokens:
+        for token in original_tokens:
+            if len(token) >= 3:
                 conditions.append(MovieDB.title.ilike(f"%{token}%"))
+
+    if conditions:
         query = query.filter(or_(*conditions))
     else:
-        # Fallback на обычный поиск
+        # Полный fallback
         query = query.filter(MovieDB.title.ilike(f"%{title}%"))
 
     results = query.group_by(MovieDB.id).all()
     
-    # Если есть лемматизированные токены - ищем по ним
-    if title_tokens and len(title_tokens) > 0 and title_tokens[0]:
-        # Строим условие поиска: фильм должен содержать хотя бы один из токенов
-        conditions = [MovieDB.title.ilike(f"%{token}%") for token in title_tokens]
-        query = query.filter(or_(*conditions))
-    else:
-        # Fallback на обычный поиск
-        query = query.filter(MovieDB.title.ilike(f"%{title}%"))
-    
-    results = query.group_by(MovieDB.id).all()
     # 3. Достаем оценки пользователя (если он вошел)
     user_ratings_map = {}
     if user_id > 0:
