@@ -97,14 +97,9 @@ function App() {
     try {
 
       // Устанавливаем выбранный фильм как "якорь" для внешних источников
-      // Получаем полную информацию о фильме из search эндпоинта
-      const searchRes = await axios.get(`${API_URL}/search`, {
-        params: { title: baseMovieId, user_id: user ? user.id : 0 }
-      });
-
-      // Если нашли фильм по ID (через поиск по названию может не сработать)
-      // Используем упрощенный подход - просто сохраняем ID
-      const movieInfo = searchRes.data && searchRes.data.length > 0 ? searchRes.data[0] : { id: baseMovieId };
+      // Получаем полную информацию о фильме через новый эндпоинт /movies/{id}
+      const movieRes = await axios.get(`${API_URL}/movies/${baseMovieId}`);
+      const movieInfo = movieRes.data;
       setSelectedMovie(movieInfo);
       setAnchorMovie(movieInfo); // Сохраняем якорный фильм для отображения плашки
 
@@ -276,6 +271,10 @@ function App() {
       const res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
       setMovies(res.data);
       
+      // ВАЖНО: НЕ сбрасываем anchorMovie здесь!
+      // Якорный фильм сохраняется глобально и не должен сбрасываться при переключении вкладок
+      // Сброс происходит только по кнопке "✕ Сбросить"
+
       // Скроллим наверх для удобства
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -557,7 +556,8 @@ function App() {
         <div style={layoutStyles.contentArea}>
           
           {/* Секция 1: Обычная выдача (или результаты поиска) */}
-          {movies.length > 0 && (
+          {/* Показываем блок "Популярное / Случайное" ТОЛЬКО если нет якорного фильма и мы во вкладке "Моя система" */}
+          {movies.length > 0 && !anchorMovie && activeSource === 'my_algo' && (
             <div style={layoutStyles.section}>
               <h3 style={layoutStyles.sectionTitle}>
                   {search ? `Поиск: "${search}"` : "Популярное / Случайное"}
