@@ -93,7 +93,7 @@ function App() {
   };
 
   // Поиск похожих на конкретный фильм
-  const fetchRecommendations = async (baseMovieId) => {
+  const fetchRecommendations = async (baseMovieId, source = 'my_algo') => {
     try {
 
       // Устанавливаем выбранный фильм как "якорь" для внешних источников
@@ -108,12 +108,27 @@ function App() {
       setSelectedMovie(movieInfo);
       setAnchorMovie(movieInfo); // Сохраняем якорный фильм для отображения плашки
 
-      const res = await axios.post(`${API_URL}/recommendations/custom`, {
-        user_id: user ? user.id : 0,
-        base_movie_ids: [baseMovieId],
-        weights: weights,
-        manual_keywords: "" 
-      });
+      // Вызываем соответствующий эндпоинт в зависимости от источника
+      let res;
+      if (source === 'kinopoisk') {
+        res = await axios.get(`${API_URL}/api/recommendations/kinopoisk`, {
+          params: { user_id: user ? user.id : 0, anchor_movie_id: baseMovieId }
+        });
+      } else if (source === 'qwen_ai') {
+        res = await axios.post(`${API_URL}/api/recommendations/external-ai`, {
+          user_id: user ? user.id : 0,
+          anchor_movie_id: baseMovieId
+        });
+      } else {
+        // my_algo - используем текущую логику
+        res = await axios.post(`${API_URL}/recommendations/custom`, {
+          user_id: user ? user.id : 0,
+          base_movie_ids: [baseMovieId],
+          weights: weights,
+          manual_keywords: ""
+        });
+      }
+
       setRecommendations(res.data);
       document.getElementById('rec-section')?.scrollIntoView({ behavior: 'smooth' });
     } catch (err) {
@@ -205,6 +220,9 @@ function App() {
         res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
         setMovies(res.data);
         setRecommendations([]);
+        // При возврате к общей ленте очищаем якорный фильм
+        setAnchorMovie(null);
+        setSelectedMovie(null);
       } else if (source === 'kinopoisk') {
         // Кинопоиск - передаем anchor_movie_id если фильм выбран
         const params = { user_id: user ? user.id : 0 };
@@ -608,7 +626,7 @@ function App() {
                    key={movie.id} 
                    movie={movie} 
                    onRate={handleRate}
-                   onRecommend={() => fetchRecommendations(movie.id)} 
+                   onRecommend={() => fetchRecommendations(movie.id, activeSource)}
                    onToggleStaff={() => fetchStaff(movie.id)}
                    onToggleDesc={() => toggleDescription(movie.id)}
                    staffData={selectedStaff[movie.id]}
