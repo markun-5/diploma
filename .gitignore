@@ -1,8 +1,18 @@
 ```
-# Environment variables
+# Dependencies
+node_modules/
+
+# Environment
 .env
 .env.local
 .env.*
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
 
 # Python
 __pycache__/
@@ -10,28 +20,9 @@ __pycache__/
 *.pyo
 *.pyd
 .Python
-env/
 venv/
 .venv/
-.venv.bak/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-*.pot
-*.pyc
-*.pyo
-*.pyd
-*.so
-*.egg-info/
-.eggs/
-dist/
-build/
-*.egg
+.env
+.env.local
+.env.*
 ```

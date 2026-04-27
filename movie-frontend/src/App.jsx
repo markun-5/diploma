@@ -28,6 +28,13 @@ function App() {
 
   const [anchorMovie, setAnchorMovie] = useState(null); // Якорный фильм для отображения плашки
 
+  // Состояние для временного сохранения текущей подборки перед поиском
+  const [searchBackup, setSearchBackup] = useState({
+    movies: [],
+    recommendations: [],
+    source: 'my_algo'
+  });
+
   const [weights, setWeights] = useState({
     genres: 5,
     staff: 2,
@@ -58,9 +65,25 @@ function App() {
   // Обычный поиск по названию (TF-IDF title)
   const handleSearch = async (e) => {
     e.preventDefault();
-    if (!search.trim()) return;
+    
+    // Если поле поиска очищается — восстанавливаем предыдущую подборку
+    if (!search.trim()) {
+      setMovies(searchBackup.movies);
+      setRecommendations(searchBackup.recommendations);
+      setActiveSource(searchBackup.source);
+      setSearch("");
+      return;
+    }
+    
     try {
-      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`); // Исправил query -> title (как в main.py)
+      // Сохраняем текущую подборку перед поиском (всегда, чтобы можно было вернуться)
+      setSearchBackup({
+        movies: movies,
+        recommendations: recommendations,
+        source: activeSource
+      });
+      
+      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`);
       setMovies(res.data);
       setRecommendations([]); 
     } catch (err) {
@@ -212,12 +235,22 @@ function App() {
       let res;
       if (source === 'my_algo') {
         // Моя система - используем существующий эндпоинт
-        res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
-        setMovies(res.data);
-        setRecommendations([]);
-        // При возврате к общей ленте очищаем якорный фильм
-        setAnchorMovie(null);
-        setSelectedMovie(null);
+        // Если есть якорный фильм — запрашиваем рекомендации по нему
+        if (anchorMovie && anchorMovie.id) {
+          res = await axios.post(`${API_URL}/recommendations/custom`, {
+            user_id: user ? user.id : 0,
+            base_movie_ids: [anchorMovie.id],
+            weights: weights,
+            manual_keywords: ""
+          });
+          setRecommendations(res.data);
+          setMovies([]);
+        } else {
+          // Нет якорного фильма — загружаем общие рекомендации
+          res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
+          setMovies(res.data);
+          setRecommendations([]);
+        }
       } else if (source === 'kinopoisk') {
         // Кинопоиск - передаем anchor_movie_id если фильм выбран
         const params = { user_id: user ? user.id : 0 };
@@ -261,20 +294,19 @@ function App() {
     // 1. Очищаем все поля поиска
     setSearch("");
     setSmartSearchQuery("");
-    setRecommendations([]); // Скрываем блок AI рекомендаций
 
     try {
-      // 2. Запрашиваем фильмы с высоким рейтингом
-      // Мы можем использовать существующий эндпоинт или создать новый.
-      // Если в бэкенде /recommendations/{id} возвращает рандом, 
-      // давай добавим вызов, который вернет именно ТОП.
-      const res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
-      setMovies(res.data);
+      // 2. Загружаем рекомендации в зависимости от наличия якорного фильма
+      if (anchorMovie && anchorMovie.id) {
+        // Есть якорный фильм — загружаем рекомендации по нему через "Мою систему"
+        await loadRecommendations('my_algo');
+      } else {
+        // Нет якорного фильма — загружаем общие рекомендации
+        const res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
+        setMovies(res.data);
+        setRecommendations([]);
+      }
       
-      // ВАЖНО: НЕ сбрасываем anchorMovie здесь!
-      // Якорный фильм сохраняется глобально и не должен сбрасываться при переключении вкладок
-      // Сброс происходит только по кнопке "✕ Сбросить"
-
       // Скроллим наверх для удобства
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -415,7 +447,15 @@ function App() {
             <input 
               style={layoutStyles.input}
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={e => {
+                setSearch(e.target.value);
+                // Если поле очищается — восстанавливаем подборку
+                if (e.target.value === "") {
+                  setMovies(searchBackup.movies);
+                  setRecommendations(searchBackup.recommendations);
+                  setActiveSource(searchBackup.source);
+                }
+              }}
               placeholder="Название (напр. Матрица)..."
             />
             <button type="submit" style={layoutStyles.iconButton}><Search size={16}/></button>
@@ -597,8 +637,8 @@ function App() {
                     onClick={() => {
                       setAnchorMovie(null);
                       setSelectedMovie(null);
-                      setRecommendations([]);
-                      loadRecommendations('my_algo');
+                      setSearchBackup({ movies: [], recommendations: [], source: 'my_algo' }); // Очищаем бэкап поиска
+                      loadRecommendations('my_algo'); // Загружаем общие рекомендации
                     }}
                     style={{background: '#ef4444', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '13px'}}
                   >
