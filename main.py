@@ -318,19 +318,44 @@ class CustomRecRequest(BaseModel):
 def read_root():
     return {"status": "Database connected and API is running"}
 
-@app.get("/recommendations/{user_id}")
-async def get_recommendations(user_id: int):
-    REC_COUNT = 20 
-    db = SessionLocal()
+@app.get("/test-svd/{user_id}")
+async def test_svd(user_id: int):
+    if svd_model is None:
+        return {"error": "SVD not trained"}
     
     ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
-    watched_ids = {r.movie_id for r in ratings}
+    if len(ratings) < 5:
+        return {"error": f"Not enough ratings: {len(ratings)}"}
+    
+    all_movie_ids = movies_df['id'].unique()
+    preds = []
+    for m_id in all_movie_ids:
+        try:
+            est = svd_model.predict(user_id, m_id).est
+            preds.append((m_id, est))
+        except:
+            pass
+    
+    preds.sort(key=lambda x: x[1], reverse=True)
+    top_10 = preds[:10]
+    
+    db = SessionLocal()
+    results = db.query(MovieDB).filter(MovieDB.id.in_([x[0] for x in top_10])).all()
+    db.close()
+    
+    return [{"id": m.id, "title": m.title, "svd_score": next(x[1] for x in top_10 if x[0] == m.id)} for m in results]
 
+# ТЕСТОВЫЙ ВАРИАНТ
+@app.get("/recommendations/{user_id}")
+async def get_recommendations(user_id: int):
+    REC_COUNT = 20
+    db = SessionLocal()
+    ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
+    watched_ids = {r.movie_id for r in ratings}
     user_ratings_map = {r.movie_id: r.rating for r in ratings}
 
+    # 🥶 Холодный старт (нет оценок)
     if not ratings:
-        # Запрос: Берем фильмы, считаем средний бал и кол-во голосов на нашем сайте,
-        # но сортируем в первую очередь по IMDb (так как там база оценок больше)
         results = db.query(
             MovieDB, 
             func.avg(RatingDB.rating).label("avg"), 
@@ -343,72 +368,77 @@ async def get_recommendations(user_id: int):
         final = []
         for movie, avg, cnt in results:
             final.append({
-                "id": movie.id, 
-                "title": movie.title, 
-                "genres": movie.genres,
-                "description": movie.description, 
-                "poster_url": movie.poster_url,
-                "average_rating": round(avg, 1) if avg else 0, 
-                "votes": cnt, 
-                "imdb_rating": movie.imdb_rating,
-                "user_rating": user_ratings_map.get(movie.id, 0)
+                "id": movie.id, "title": movie.title, "genres": movie.genres,
+                "description": movie.description, "poster_url": movie.poster_url,
+                "average_rating": round(avg, 1) if avg else 0, "votes": cnt, 
+                "imdb_rating": movie.imdb_rating, "user_rating": user_ratings_map.get(movie.id, 0)
             })
         db.close()
         return final
 
-    top_movies = [r.movie_id for r in ratings if r.rating >= 7][:5]
-    bad_movies = [r.movie_id for r in ratings if r.rating <= 4][:5]
-    
-    total_scores = np.zeros(movies_df.shape[0])
-
-    # Считаем сходство для "лайков"
-    for m_id in top_movies:
-        if m_id in indices:
-            idx = indices[m_id]
-            
-            # TF-IDF Similarity
-            sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
-            sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
-            
-            # Semantic Similarity (возвращает Tensor, переводим в numpy)
-            base_vec = matrix_desc_semantic[idx]
-            sim_d = util.cos_sim(base_vec, matrix_desc_semantic).cpu().numpy().flatten()
-            
-            total_scores += (sim_g * REC_WEIGHTS["genres"] + 
-                             sim_s * REC_WEIGHTS["staff"] + 
-                             sim_d * REC_WEIGHTS["description"])
-
-    # Вычитаем анти-интересы
-    for m_id in bad_movies:
-        if m_id in indices:
-            idx = indices[m_id]
-            sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
-            sim_d = util.cos_sim(matrix_desc_semantic[idx], matrix_desc_semantic).cpu().numpy().flatten()
-            # У жанров и сюжета сильный штраф, стафф меньше штрафуем
-            total_scores -= (sim_g * 1.5 + sim_d * 1.0)
-
-    combined_indices = np.argsort(total_scores)[::-1]
-    
     rec_movie_ids = []
-    for idx in combined_indices:
-        m_id = int(movies_df.iloc[idx]['id'])
-        if m_id not in watched_ids:
-            rec_movie_ids.append(m_id)
-        if len(rec_movie_ids) >= REC_COUNT:
-            break
 
-    # 4. Добор через SVD (если список пуст или мал)
-    if len(rec_movie_ids) < REC_COUNT and svd_model is not None:
-        all_movie_ids = movies_df['id'].unique()
-        candidate_ids = [int(m_id) for m_id in all_movie_ids if m_id not in watched_ids and m_id not in rec_movie_ids]
-        preds = sorted([(m_id, svd_model.predict(user_id, m_id).est) for m_id in candidate_ids], key=lambda x: x[1], reverse=True)
-        for x in preds:
-            rec_movie_ids.append(x[0])
+    # === 1️⃣ SVD: ОСНОВНОЙ МЕТОД ===
+    if svd_model is not None and len(ratings) >= 5:
+        try:
+            all_movie_ids = movies_df['id'].unique()
+            candidate_ids = [int(m_id) for m_id in all_movie_ids if m_id not in watched_ids]
+            
+            # Предсказываем рейтинг для каждого кандидата
+            preds = []
+            for m_id in candidate_ids:
+                try:
+                    est = svd_model.predict(user_id, m_id).est
+                    preds.append((m_id, est))
+                except:
+                    pass  # Пропускаем, если фильм/юзер не в обучающей выборке
+            
+            # Сортируем по предсказанному рейтингу (по убыванию)
+            preds.sort(key=lambda x: x[1], reverse=True)
+            rec_movie_ids = [x[0] for x in preds[:REC_COUNT]]
+            print(f"✅ SVD (Primary): подобрано {len(rec_movie_ids)} фильмов")
+        except Exception as e:
+            print(f"⚠️ SVD primary failed: {e}")
+
+    # === 2️⃣ ГИБРИД: ВТОРИЧНЫЙ (заполняет пробелы или страхует) ===
+    if len(rec_movie_ids) < REC_COUNT:
+        needed = REC_COUNT - len(rec_movie_ids)
+        print(f" Hybrid (Secondary): добираем {needed} фильмов...")
+        
+        total_scores = np.zeros(movies_df.shape[0])
+        top_movies = [r.movie_id for r in ratings if r.rating >= 7][:5]
+        bad_movies = [r.movie_id for r in ratings if r.rating <= 4][:5]
+
+        # Считаем сходство для "лайков"
+        for m_id in top_movies:
+            if m_id in indices:
+                idx = indices[m_id]
+                sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+                sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
+                base_vec = matrix_desc_semantic[idx]
+                sim_d = util.cos_sim(base_vec, matrix_desc_semantic).cpu().numpy().flatten()
+                total_scores += (sim_g * REC_WEIGHTS["genres"] + 
+                                 sim_s * REC_WEIGHTS["staff"] + 
+                                 sim_d * REC_WEIGHTS["description"])
+
+        # Вычитаем анти-интересы
+        for m_id in bad_movies:
+            if m_id in indices:
+                idx = indices[m_id]
+                sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+                sim_d = util.cos_sim(matrix_desc_semantic[idx], matrix_desc_semantic).cpu().numpy().flatten()
+                total_scores -= (sim_g * 1.5 + sim_d * 1.0)
+
+        combined_indices = np.argsort(total_scores)[::-1]
+        for idx in combined_indices:
+            m_id = int(movies_df.iloc[idx]['id'])
+            # Добавляем только если еще не попал в список от SVD
+            if m_id not in watched_ids and m_id not in rec_movie_ids:
+                rec_movie_ids.append(m_id)
             if len(rec_movie_ids) >= REC_COUNT:
                 break
 
-    # 5. Итоговый результат (с IMDb и средним баллом)
-    # Формирование ответа
+    # === 3️⃣ ФОРМИРОВАНИЕ ОТВЕТА ===
     results = db.query(MovieDB, func.avg(RatingDB.rating).label("avg"), func.count(RatingDB.id).label("cnt"))\
         .outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
         .filter(MovieDB.id.in_(rec_movie_ids[:REC_COUNT]))\
@@ -419,11 +449,143 @@ async def get_recommendations(user_id: int):
         final.append({
             "id": movie.id, "title": movie.title, "genres": movie.genres,
             "description": movie.description, "poster_url": movie.poster_url,
-            "average_rating": round(avg, 1) if avg else 0, "votes": cnt, "imdb_rating": movie.imdb_rating, "user_rating": user_ratings_map.get(movie.id, 0)
+            "average_rating": round(avg, 1) if avg else 0, "votes": cnt, 
+            "imdb_rating": movie.imdb_rating, "user_rating": user_ratings_map.get(movie.id, 0)
         })
+    
+    # Сохраняем порядок, в котором собрали рекомендации
     final.sort(key=lambda x: rec_movie_ids.index(x["id"]))
     db.close()
     return final
+
+# РАБОЧИЙ ВАРИАНТ
+# @app.get("/recommendations/{user_id}")
+# async def get_recommendations(user_id: int):
+#     REC_COUNT = 20 
+#     db = SessionLocal()
+    
+#     ratings = db.query(RatingDB).filter(RatingDB.user_id == user_id).all()
+#     watched_ids = {r.movie_id for r in ratings}
+
+#     user_ratings_map = {r.movie_id: r.rating for r in ratings}
+
+#     if not ratings:
+#         # Запрос: Берем фильмы, считаем средний бал и кол-во голосов на нашем сайте,
+#         # но сортируем в первую очередь по IMDb (так как там база оценок больше)
+#         results = db.query(
+#             MovieDB, 
+#             func.avg(RatingDB.rating).label("avg"), 
+#             func.count(RatingDB.id).label("cnt")
+#         ).outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+#          .group_by(MovieDB.id)\
+#          .order_by(MovieDB.imdb_rating.desc(), func.count(RatingDB.id).desc())\
+#          .limit(REC_COUNT).all()
+
+#         final = []
+#         for movie, avg, cnt in results:
+#             final.append({
+#                 "id": movie.id, 
+#                 "title": movie.title, 
+#                 "genres": movie.genres,
+#                 "description": movie.description, 
+#                 "poster_url": movie.poster_url,
+#                 "average_rating": round(avg, 1) if avg else 0, 
+#                 "votes": cnt, 
+#                 "imdb_rating": movie.imdb_rating,
+#                 "user_rating": user_ratings_map.get(movie.id, 0)
+#             })
+#         db.close()
+#         return final
+
+#     top_movies = [r.movie_id for r in ratings if r.rating >= 7][:5]
+#     bad_movies = [r.movie_id for r in ratings if r.rating <= 4][:5]
+    
+#     total_scores = np.zeros(movies_df.shape[0])
+
+#     # Считаем сходство для "лайков"
+#     for m_id in top_movies:
+#         if m_id in indices:
+#             idx = indices[m_id]
+            
+#             # TF-IDF Similarity
+#             sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+#             sim_s = linear_kernel(matrix_staff[idx], matrix_staff).flatten()
+            
+#             # Semantic Similarity (возвращает Tensor, переводим в numpy)
+#             base_vec = matrix_desc_semantic[idx]
+#             sim_d = util.cos_sim(base_vec, matrix_desc_semantic).cpu().numpy().flatten()
+            
+#             total_scores += (sim_g * REC_WEIGHTS["genres"] + 
+#                              sim_s * REC_WEIGHTS["staff"] + 
+#                              sim_d * REC_WEIGHTS["description"])
+
+#     # === 🔹 ДОБАВЛЯЕМ SVD В ГИБРИДНЫЙ СКОРИНГ 🔹 ===
+#     # Если модель SVD обучена и у пользователя есть оценки — добавляем предсказания в общий скор
+#     if svd_model is not None and len(ratings) >= 5:  # Минимум 5 оценок для качества
+#         svd_weight = 2.5  # Коэффициент влияния SVD (чем больше, тем сильнее персонализация)
+        
+#         for i, m_id in enumerate(movies_df['id']):
+#             # Пропускаем уже просмотренные фильмы
+#             if m_id in watched_ids:
+#                 continue
+#             try:
+#                 # Предсказание рейтинга (диапазон 1–10)
+#                 svd_pred = svd_model.predict(user_id, m_id).est
+#                 # Нормализуем: 1→0, 10→1, чтобы совместить с косинусными сими (0–1)
+#                 normalized_svd = (svd_pred - 1) / 9
+#                 # Добавляем в total_scores с весом
+#                 total_scores[i] += normalized_svd * svd_weight
+#             except:
+#                 # Пропускаем, если фильм или пользователь неизвестны модели
+#                 pass
+#     # ===========================================
+
+#     # Вычитаем анти-интересы
+#     for m_id in bad_movies:
+#         if m_id in indices:
+#             idx = indices[m_id]
+#             sim_g = linear_kernel(matrix_genres[idx], matrix_genres).flatten()
+#             sim_d = util.cos_sim(matrix_desc_semantic[idx], matrix_desc_semantic).cpu().numpy().flatten()
+#             # У жанров и сюжета сильный штраф, стафф меньше штрафуем
+#             total_scores -= (sim_g * 1.5 + sim_d * 1.0)
+
+#     combined_indices = np.argsort(total_scores)[::-1]
+    
+#     rec_movie_ids = []
+#     for idx in combined_indices:
+#         m_id = int(movies_df.iloc[idx]['id'])
+#         if m_id not in watched_ids:
+#             rec_movie_ids.append(m_id)
+#         if len(rec_movie_ids) >= REC_COUNT:
+#             break
+
+#     # 4. Добор через SVD (если список пуст или мал)
+#     if len(rec_movie_ids) < REC_COUNT and svd_model is not None:
+#         all_movie_ids = movies_df['id'].unique()
+#         candidate_ids = [int(m_id) for m_id in all_movie_ids if m_id not in watched_ids and m_id not in rec_movie_ids]
+#         preds = sorted([(m_id, svd_model.predict(user_id, m_id).est) for m_id in candidate_ids], key=lambda x: x[1], reverse=True)
+#         for x in preds:
+#             rec_movie_ids.append(x[0])
+#             if len(rec_movie_ids) >= REC_COUNT:
+#                 break
+
+#     # 5. Итоговый результат (с IMDb и средним баллом)
+#     # Формирование ответа
+#     results = db.query(MovieDB, func.avg(RatingDB.rating).label("avg"), func.count(RatingDB.id).label("cnt"))\
+#         .outerjoin(RatingDB, MovieDB.id == RatingDB.movie_id)\
+#         .filter(MovieDB.id.in_(rec_movie_ids[:REC_COUNT]))\
+#         .group_by(MovieDB.id).all()
+
+#     final = []
+#     for movie, avg, cnt in results:
+#         final.append({
+#             "id": movie.id, "title": movie.title, "genres": movie.genres,
+#             "description": movie.description, "poster_url": movie.poster_url,
+#             "average_rating": round(avg, 1) if avg else 0, "votes": cnt, "imdb_rating": movie.imdb_rating, "user_rating": user_ratings_map.get(movie.id, 0)
+#         })
+#     final.sort(key=lambda x: rec_movie_ids.index(x["id"]))
+#     db.close()
+#     return final
 
 
 @app.get("/movies/{movie_id}")

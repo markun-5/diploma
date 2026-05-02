@@ -28,6 +28,14 @@ function App() {
 
   const [anchorMovie, setAnchorMovie] = useState(null); // Якорный фильм для отображения плашки
 
+  // Состояние для временного сохранения текущей подборки перед поиском
+  const [searchBackup, setSearchBackup] = useState({
+    movies: [],
+    recommendations: [],
+    source: 'my_algo',
+    anchorMovie: null  // ← добавляем якорь в бэкап
+  });
+
   const [weights, setWeights] = useState({
     genres: 5,
     staff: 2,
@@ -58,11 +66,35 @@ function App() {
   // Обычный поиск по названию (TF-IDF title)
   const handleSearch = async (e) => {
     e.preventDefault();
-    if (!search.trim()) return;
+    // Если поле поиска очищается — восстанавливаем предыдущую подборку
+    if (!search.trim()) {
+      setMovies(searchBackup.movies);
+      setRecommendations(searchBackup.recommendations);
+      setActiveSource(searchBackup.source);
+      // Восстанавливаем якорь из бэкапа (если он там был сохранён)
+      if (searchBackup.anchorMovie) {
+        setAnchorMovie(searchBackup.anchorMovie);
+        setSelectedMovie(searchBackup.anchorMovie);
+      }
+      setSearch("");
+      return;
+    }
+
     try {
-      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`); // Исправил query -> title (как в main.py)
+      // Сохраняем текущую подборку перед поиском (всегда, чтобы можно было вернуться)
+      setSearchBackup({
+        movies: movies,
+        recommendations: recommendations,
+        source: activeSource,
+        anchorMovie: anchorMovie  // ← сохраняем и якорь тоже
+      });
+
+      // Поиск ВСЕГДА идёт по всей БД, игнорируя anchorMovie
+      // Якорь остаётся в состоянии, но не влияет на запрос поиска
+      const res = await axios.get(`${API_URL}/search?title=${search}&user_id=${user ? user.id : 0}`);
       setMovies(res.data);
       setRecommendations([]); 
+      // anchorMovie НЕ меняем — он остаётся, но не влияет на поиск
     } catch (err) {
       console.error("Ошибка поиска", err);
     }
@@ -97,14 +129,9 @@ function App() {
     try {
 
       // Устанавливаем выбранный фильм как "якорь" для внешних источников
-      // Получаем полную информацию о фильме из search эндпоинта
-      const searchRes = await axios.get(`${API_URL}/search`, {
-        params: { title: baseMovieId, user_id: user ? user.id : 0 }
-      });
-
-      // Если нашли фильм по ID (через поиск по названию может не сработать)
-      // Используем упрощенный подход - просто сохраняем ID
-      const movieInfo = searchRes.data && searchRes.data.length > 0 ? searchRes.data[0] : { id: baseMovieId };
+      // Получаем полную информацию о фильме через новый эндпоинт /movies/{id}
+      const movieRes = await axios.get(`${API_URL}/movies/${baseMovieId}`);
+      const movieInfo = movieRes.data;
       setSelectedMovie(movieInfo);
       setAnchorMovie(movieInfo); // Сохраняем якорный фильм для отображения плашки
 
@@ -206,7 +233,8 @@ function App() {
   };
 
   // --- ЗАГРУЗКА РЕКОМЕНДАЦИЙ ОТ РАЗНЫХ ИСТОЧНИКОВ ---
-  const loadRecommendations = async (source) => {
+  const loadRecommendations = async (source, options = {}) => {
+    const { forceNoAnchor = false } = options; // Принудительно игнорировать якорь
     setActiveSource(source);
     setSourceError(null);
 
@@ -217,16 +245,27 @@ function App() {
       let res;
       if (source === 'my_algo') {
         // Моя система - используем существующий эндпоинт
-        res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
-        setMovies(res.data);
-        setRecommendations([]);
-        // При возврате к общей ленте очищаем якорный фильм
-        setAnchorMovie(null);
-        setSelectedMovie(null);
+        // Если есть якорный фильм И не установлен forceNoAnchor — запрашиваем рекомендации по нему
+        if (!forceNoAnchor && anchorMovie && anchorMovie.id) {
+          res = await axios.post(`${API_URL}/recommendations/custom`, {
+            user_id: user ? user.id : 0,
+            base_movie_ids: [anchorMovie.id],
+            weights: weights,
+            manual_keywords: ""
+          });
+          setRecommendations(res.data);
+          setMovies([]);
+        } else {
+          // Нет якорного фильма или forceNoAnchor=true — загружаем общие рекомендации по пользователю
+          res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
+          setMovies(res.data);
+          setRecommendations([]);
+        }
       } else if (source === 'kinopoisk') {
         // Кинопоиск - передаем anchor_movie_id если фильм выбран
         const params = { user_id: user ? user.id : 0 };
-        if (selectedMovie && selectedMovie.id) {
+        // Используем selectedMovie как якорь (он устанавливается через fetchRecommendations)
+        if (!forceNoAnchor && selectedMovie && selectedMovie.id) {
           params.anchor_movie_id = selectedMovie.id;
           console.log(`DEBUG KP Frontend: Передаю anchor_movie_id=${selectedMovie.id}`);
         }
@@ -236,7 +275,8 @@ function App() {
       } else if (source === 'qwen_ai') {
         // AI (DeepSeek) - передаем anchor_movie_id если фильм выбран
         const payload = { user_id: user ? user.id : 0 };
-        if (selectedMovie && selectedMovie.id) {
+        // Используем selectedMovie как якорь (он устанавливается через fetchRecommendations)
+        if (!forceNoAnchor && selectedMovie && selectedMovie.id) {
           payload.anchor_movie_id = selectedMovie.id;
           console.log(`DEBUG AI Frontend: Передаю anchor_movie_id=${selectedMovie.id}`);
         }
@@ -266,16 +306,20 @@ function App() {
     // 1. Очищаем все поля поиска
     setSearch("");
     setSmartSearchQuery("");
-    setRecommendations([]); // Скрываем блок AI рекомендаций
+    //setRecommendations([]); // Скрываем блок AI рекомендаций
 
     try {
-      // 2. Запрашиваем фильмы с высоким рейтингом
-      // Мы можем использовать существующий эндпоинт или создать новый.
-      // Если в бэкенде /recommendations/{id} возвращает рандом, 
-      // давай добавим вызов, который вернет именно ТОП.
-      const res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
-      setMovies(res.data);
-      
+      // 2. Загружаем рекомендации в зависимости от наличия якорного фильма
+      if (anchorMovie && anchorMovie.id) {
+        // Есть якорный фильм — загружаем рекомендации по нему через "Мою систему"
+        await loadRecommendations('my_algo');
+      } else {
+        // Нет якорного фильма — загружаем общие рекомендации
+        const res = await axios.get(`${API_URL}/recommendations/${user ? user.id : 0}`);
+        setMovies(res.data);
+        setRecommendations([]);
+      }
+
       // Скроллим наверх для удобства
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -416,7 +460,15 @@ function App() {
             <input 
               style={layoutStyles.input}
               value={search}
-              onChange={e => setSearch(e.target.value)}
+              onChange={e => {
+                setSearch(e.target.value);
+                // Если поле очищается — восстанавливаем подборку
+                if (e.target.value === "") {
+                  setMovies(searchBackup.movies);
+                  setRecommendations(searchBackup.recommendations);
+                  setActiveSource(searchBackup.source);
+                }
+              }}
               placeholder="Название (напр. Матрица)..."
             />
             <button type="submit" style={layoutStyles.iconButton}><Search size={16}/></button>
@@ -464,7 +516,7 @@ function App() {
                 Поиск по смыслу
             </label>
             <textarea 
-                style={{...layoutStyles.input, minHeight: '60px', marginBottom: '10px', fontSize: '13px'}}
+                style={{...layoutStyles.input, minHeight: '60px', resize: 'none', marginBottom: '10px', fontSize: '13px'}}
                 placeholder="Например: грустный фильм про космос и одиночество..."
                 value={smartSearchQuery}
                 onChange={e => setSmartSearchQuery(e.target.value)}
@@ -557,7 +609,8 @@ function App() {
         <div style={layoutStyles.contentArea}>
           
           {/* Секция 1: Обычная выдача (или результаты поиска) */}
-          {movies.length > 0 && (
+          {/* Показываем блок "Популярное / Случайное" ТОЛЬКО если нет якорного фильма и мы во вкладке "Моя система" */}
+          {movies.length > 0 && !anchorMovie && activeSource === 'my_algo' && (
             <div style={layoutStyles.section}>
               <h3 style={layoutStyles.sectionTitle}>
                   {search ? `Поиск: "${search}"` : "Популярное / Случайное"}
@@ -595,10 +648,19 @@ function App() {
                   <span style={{color: '#1e40af', fontSize: '14px'}}>🔍 Похожие на: <b>{anchorMovie.title || `фильм #${anchorMovie.id}`}</b></span>
                   <button
                     onClick={() => {
+                      // 1. Сбрасываем ТОЛЬКО якорный фильм
                       setAnchorMovie(null);
                       setSelectedMovie(null);
-                      setRecommendations([]);
-                      loadRecommendations('my_algo');
+                      // 2. НЕ меняем activeSource — остаёмся в текущей вкладке
+                      // 3. Перезагружаем рекомендации БЕЗ якоря для текущего источника
+                      if (activeSource === 'kinopoisk') {
+                        loadRecommendations('kinopoisk', { forceNoAnchor: true });
+                      } else if (activeSource === 'qwen_ai') {
+                        loadRecommendations('qwen_ai', { forceNoAnchor: true });
+                      } else {
+                        // my_algo: грузим общие рекомендации по пользователю (forceNoAnchor=true игнорирует якорь)
+                        loadRecommendations('my_algo', { forceNoAnchor: true });
+                      }
                     }}
                     style={{background: '#ef4444', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '13px'}}
                   >
